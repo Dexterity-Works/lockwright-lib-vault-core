@@ -15,7 +15,7 @@
   "dependencies": {
     "@noble/ciphers": "^2.2.0",
     "@noble/hashes": "^2.0.1",
-    "@tetherto/pearpass-utils-password-check": "git+https://github.com/tetherto/pearpass-utils-password-check",
+    "@tetherto/pearpass-utils-password-check": "git+https://github.com/Dexterity-Works/pearpass-utils-password-check",
     "autopass": "~3.3.0",
     "b4a": "^1.7.3",
     "bare-buffer": "^3.4.2",
@@ -45,7 +45,7 @@
   "devDependencies": {
     "@babel/core": "^7.28.4",
     "@babel/preset-env": "^7.28.3",
-    "@tetherto/tether-dev-docs": "git+https://github.com/tetherto/tether-dev-docs",
+    "@tetherto/tether-dev-docs": "git+https://github.com/Dexterity-Works/tether-dev-docs",
     "babel-jest": "30.2.0",
     "eslint": "^9.39.3",
     "eslint-config-prettier": "9.1.0",

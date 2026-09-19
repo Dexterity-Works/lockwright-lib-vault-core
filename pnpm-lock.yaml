@@ -214,8 +214,8 @@ importers:
         specifier: ^2.0.1
         version: 2.3.0
       '@tetherto/pearpass-utils-password-check':
-        specifier: git+https://github.com/tetherto/pearpass-utils-password-check
-        version: https://codeload.github.com/tetherto/pearpass-utils-password-check/tar.gz/5175d97c3c560221a6f1a36d4c3c8be9c45daf81
+        specifier: git+https://github.com/Dexterity-Works/pearpass-utils-password-check
+        version: https://codeload.github.com/Dexterity-Works/pearpass-utils-password-check/tar.gz/5175d97c3c560221a6f1a36d4c3c8be9c45daf81
       autopass:
         specifier: ~3.3.0
         version: 3.3.0(bare-buffer@3.6.2)(bare-events@2.9.1)(bare-url@2.4.7)
@@ -302,8 +302,8 @@ importers:
         specifier: ^7.28.3
         version: 7.29.7(@babel/core@7.29.7)
       '@tetherto/tether-dev-docs':
-        specifier: git+https://github.com/tetherto/tether-dev-docs
-        version: https://codeload.github.com/tetherto/tether-dev-docs/tar.gz/cb82786f04714a56577df1555db947969ec90aeb(typescript@6.0.3)
+        specifier: git+https://github.com/Dexterity-Works/tether-dev-docs
+        version: https://codeload.github.com/Dexterity-Works/tether-dev-docs/tar.gz/cb82786f04714a56577df1555db947969ec90aeb(typescript@6.0.3)
       babel-jest:
         specifier: 30.2.0
         version: 30.2.0(@babel/core@7.29.7)
@@ -1160,12 +1160,12 @@ packages:
   '@sinonjs/fake-timers@13.0.5':
     resolution: {integrity: sha512-36/hTbH2uaWuGVERyC6da9YwGWnzUZXuPro/F2LfsdOsLnCojz/iSH8MxUt/FD2S5XBSVPhmArFUXcpCQ2Hkiw==}
 
-  '@tetherto/pearpass-utils-password-check@https://codeload.github.com/tetherto/pearpass-utils-password-check/tar.gz/5175d97c3c560221a6f1a36d4c3c8be9c45daf81':
-    resolution: {gitHosted: true, tarball: https://codeload.github.com/tetherto/pearpass-utils-password-check/tar.gz/5175d97c3c560221a6f1a36d4c3c8be9c45daf81}
+  '@tetherto/pearpass-utils-password-check@https://codeload.github.com/Dexterity-Works/pearpass-utils-password-check/tar.gz/5175d97c3c560221a6f1a36d4c3c8be9c45daf81':
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/Dexterity-Works/pearpass-utils-password-check/tar.gz/5175d97c3c560221a6f1a36d4c3c8be9c45daf81}
     version: 0.0.14
 
-  '@tetherto/tether-dev-docs@https://codeload.github.com/tetherto/tether-dev-docs/tar.gz/cb82786f04714a56577df1555db947969ec90aeb':
-    resolution: {gitHosted: true, tarball: https://codeload.github.com/tetherto/tether-dev-docs/tar.gz/cb82786f04714a56577df1555db947969ec90aeb}
+  '@tetherto/tether-dev-docs@https://codeload.github.com/Dexterity-Works/tether-dev-docs/tar.gz/cb82786f04714a56577df1555db947969ec90aeb':
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/Dexterity-Works/tether-dev-docs/tar.gz/cb82786f04714a56577df1555db947969ec90aeb}
     version: 0.0.8
 
   '@tybys/wasm-util@0.10.3':
@@ -2172,6 +2172,7 @@ packages:
   eslint@9.39.4:
     resolution: {integrity: sha512-XoMjdBOwe/esVgEvLmNsD3IRHkm7fbKIUGvrleloJXUZgDHig2IPWNniv+GwjyJXzuNqVjlr5+4yVUZjycJwfQ==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+    deprecated: This version is no longer supported. Please see https://eslint.org/version-support for other options.
     hasBin: true
     peerDependencies:
       jiti: '*'
@@ -2182,6 +2183,7 @@ packages:
   eslint@9.39.5:
     resolution: {integrity: sha512-DgZS62aPLXKlnxILS/AYCoRvHaZeXceIzlXPkkGGzJWSow1aEk0lbTlxUSlyjC8jcaKxAdOnTDz+o1JFSBsyjw==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+    deprecated: This version is no longer supported. Please see https://eslint.org/version-support for other options.
     hasBin: true
     peerDependencies:
       jiti: '*'
@@ -4742,9 +4744,9 @@ snapshots:
     dependencies:
       '@sinonjs/commons': 3.0.1
 
-  '@tetherto/pearpass-utils-password-check@https://codeload.github.com/tetherto/pearpass-utils-password-check/tar.gz/5175d97c3c560221a6f1a36d4c3c8be9c45daf81': {}
+  '@tetherto/pearpass-utils-password-check@https://codeload.github.com/Dexterity-Works/pearpass-utils-password-check/tar.gz/5175d97c3c560221a6f1a36d4c3c8be9c45daf81': {}
 
-  '@tetherto/tether-dev-docs@https://codeload.github.com/tetherto/tether-dev-docs/tar.gz/cb82786f04714a56577df1555db947969ec90aeb(typescript@6.0.3)':
+  '@tetherto/tether-dev-docs@https://codeload.github.com/Dexterity-Works/tether-dev-docs/tar.gz/cb82786f04714a56577df1555db947969ec90aeb(typescript@6.0.3)':
     dependencies:
       '@typescript-eslint/eslint-plugin': 8.59.4(@typescript-eslint/parser@8.59.4(eslint@9.39.5)(typescript@6.0.3))(eslint@9.39.4)(typescript@6.0.3)
       '@typescript-eslint/parser': 8.59.4(eslint@9.39.5)(typescript@6.0.3)

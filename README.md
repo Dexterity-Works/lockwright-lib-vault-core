@@ -30,7 +30,7 @@ Community fork of PearPass (Apache 2.0). Not affiliated with or endorsed by Teth
 ## Install
 
 ```bash
-pnpm add git+https://github.com/Thaoh/lockwright-lib-vault-core.git
+pnpm add git+https://github.com/Dexterity-Works/lockwright-lib-vault-core.git
 ```
 
 Imports stay `@tetherto/pearpass-lib-vault-core`. That npm name is not this fork if you install it from the npm registry.
@@ -124,11 +124,11 @@ await client.closeAllInstances();
 
 ## Related Projects
 
-- [lockwright-app-mobile](https://github.com/Thaoh/lockwright-app-mobile)
-- [lockwright-app-desktop](https://github.com/Thaoh/lockwright-app-desktop)
-- [lockwright-app-browser-extension](https://github.com/Thaoh/lockwright-app-browser-extension)
-- [lockwright-lib-vault](https://github.com/Thaoh/lockwright-lib-vault)
-- [lockwright-lib-constants](https://github.com/Thaoh/lockwright-lib-constants)
+- [lockwright-app-mobile](https://github.com/Dexterity-Works/lockwright-app-mobile)
+- [lockwright-app-desktop](https://github.com/Dexterity-Works/lockwright-app-desktop)
+- [lockwright-app-browser-extension](https://github.com/Dexterity-Works/lockwright-app-browser-extension)
+- [lockwright-lib-vault](https://github.com/Dexterity-Works/lockwright-lib-vault)
+- [lockwright-lib-constants](https://github.com/Dexterity-Works/lockwright-lib-constants)
 
 ## Contributing
 
