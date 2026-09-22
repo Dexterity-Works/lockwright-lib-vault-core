@@ -33,13 +33,13 @@ Community fork of PearPass (Apache 2.0). Not affiliated with or endorsed by Teth
 pnpm add git+https://github.com/Dexterity-Works/lockwright-lib-vault-core.git
 ```
 
-Imports stay `@tetherto/pearpass-lib-vault-core`. That npm name is not this fork if you install it from the npm registry.
+The package name is `lockwright-lib-vault-core`.
 
 ## Usage Examples
 
 ### Initialize a vault client
 ```javascript
-import { createPearpassVaultClient } from '@tetherto/pearpass-lib-vault-core';
+import { createPearpassVaultClient } from 'lockwright-lib-vault-core';
 
 // Create a new client with a storage path
 const client = createPearpassVaultClient('/path/to/storage', {

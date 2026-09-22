@@ -4,5 +4,5 @@ autoInstallPeers: true
 
 allowBuilds:
   "unrs-resolver@1.12.2": true
-  "@tetherto/pearpass-utils-password-check@https://codeload.github.com/Dexterity-Works/lockwright-utils-password-check/tar.gz/5175d97c3c560221a6f1a36d4c3c8be9c45daf81": true
+  "lockwright-utils-password-check@https://codeload.github.com/Dexterity-Works/lockwright-utils-password-check/tar.gz/3fb28bee9328290a12119feaaf912d1018fcf6f8": true
   "@tetherto/tether-dev-docs@https://codeload.github.com/Dexterity-Works/tether-dev-docs/tar.gz/cb82786f04714a56577df1555db947969ec90aeb": true

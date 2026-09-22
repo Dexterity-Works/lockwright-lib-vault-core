@@ -213,9 +213,6 @@ importers:
       '@noble/hashes':
         specifier: ^2.0.1
         version: 2.3.0
-      '@tetherto/pearpass-utils-password-check':
-        specifier: git+https://github.com/Dexterity-Works/lockwright-utils-password-check
-        version: https://codeload.github.com/Dexterity-Works/lockwright-utils-password-check/tar.gz/5175d97c3c560221a6f1a36d4c3c8be9c45daf81
       autopass:
         specifier: ~3.3.0
         version: 3.3.0(bare-buffer@3.6.2)(bare-events@2.9.1)(bare-url@2.4.7)
@@ -276,6 +273,9 @@ importers:
       hyperswarm:
         specifier: ^4.16.0
         version: 4.17.0(bare-buffer@3.6.2)(bare-url@2.4.7)
+      lockwright-utils-password-check:
+        specifier: git+https://github.com/Dexterity-Works/lockwright-utils-password-check
+        version: https://codeload.github.com/Dexterity-Works/lockwright-utils-password-check/tar.gz/3fb28bee9328290a12119feaaf912d1018fcf6f8
       otpauth:
         specifier: ^9.5.0
         version: 9.5.1
@@ -1159,10 +1159,6 @@ packages:
 
   '@sinonjs/fake-timers@13.0.5':
     resolution: {integrity: sha512-36/hTbH2uaWuGVERyC6da9YwGWnzUZXuPro/F2LfsdOsLnCojz/iSH8MxUt/FD2S5XBSVPhmArFUXcpCQ2Hkiw==}
-
-  '@tetherto/pearpass-utils-password-check@https://codeload.github.com/Dexterity-Works/lockwright-utils-password-check/tar.gz/5175d97c3c560221a6f1a36d4c3c8be9c45daf81':
-    resolution: {gitHosted: true, integrity: sha512-knrrOjYdIyM/HqlCZw0+eefTr5WJ8jlVmW7hXWk90B3U/Ak0cN9Jn6GcYfjk2If/PvRiMzHR2E1aMJixDERJGw==, tarball: https://codeload.github.com/Dexterity-Works/lockwright-utils-password-check/tar.gz/5175d97c3c560221a6f1a36d4c3c8be9c45daf81}
-    version: 0.0.14
 
   '@tetherto/tether-dev-docs@https://codeload.github.com/Dexterity-Works/tether-dev-docs/tar.gz/cb82786f04714a56577df1555db947969ec90aeb':
     resolution: {gitHosted: true, tarball: https://codeload.github.com/Dexterity-Works/tether-dev-docs/tar.gz/cb82786f04714a56577df1555db947969ec90aeb}
@@ -2865,6 +2861,10 @@ packages:
   locate-path@6.0.0:
     resolution: {integrity: sha512-iPZK6eYjbxRu3uB4/WZ3EsEIMJFMqAoopl3R+zuq0UjcAm/MO6KCweDgPfP3elTztoKP3KtnVHxTn2NHBSDVUw==}
     engines: {node: '>=10'}
+
+  lockwright-utils-password-check@https://codeload.github.com/Dexterity-Works/lockwright-utils-password-check/tar.gz/3fb28bee9328290a12119feaaf912d1018fcf6f8:
+    resolution: {gitHosted: true, integrity: sha512-rpFdkzB/3+AMd8+52LpDbkNNVNeeM29aHQ42esQulLsqTg2+4q/TgjizJhY+uaJovR88BowBGUeIvt17q3FC3Q==, tarball: https://codeload.github.com/Dexterity-Works/lockwright-utils-password-check/tar.gz/3fb28bee9328290a12119feaaf912d1018fcf6f8}
+    version: 0.0.14
 
   lodash.debounce@4.0.8:
     resolution: {integrity: sha512-FT1yDzDYEoYWhnSGnpE/4Kj1fLZkDFyqRb7fNt6FdYOSxlUWAtp42Eh6Wb0rGIv/m9Bgo7x4GhQbm5Ys4SG5ow==}
@@ -4743,8 +4743,6 @@ snapshots:
   '@sinonjs/fake-timers@13.0.5':
     dependencies:
       '@sinonjs/commons': 3.0.1
-
-  '@tetherto/pearpass-utils-password-check@https://codeload.github.com/Dexterity-Works/lockwright-utils-password-check/tar.gz/5175d97c3c560221a6f1a36d4c3c8be9c45daf81': {}
 
   '@tetherto/tether-dev-docs@https://codeload.github.com/Dexterity-Works/tether-dev-docs/tar.gz/cb82786f04714a56577df1555db947969ec90aeb(typescript@6.0.3)':
     dependencies:
@@ -7341,6 +7339,8 @@ snapshots:
   locate-path@6.0.0:
     dependencies:
       p-locate: 5.0.0
+
+  lockwright-utils-password-check@https://codeload.github.com/Dexterity-Works/lockwright-utils-password-check/tar.gz/3fb28bee9328290a12119feaaf912d1018fcf6f8: {}
 
   lodash.debounce@4.0.8: {}
 

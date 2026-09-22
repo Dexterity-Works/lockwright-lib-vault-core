@@ -1,5 +1,5 @@
 {
-  "name": "@tetherto/pearpass-lib-vault-core",
+  "name": "lockwright-lib-vault-core",
   "version": "0.2.0",
   "type": "module",
   "description": "A bare wrapper for vault management library",
@@ -15,7 +15,7 @@
   "dependencies": {
     "@noble/ciphers": "^2.2.0",
     "@noble/hashes": "^2.0.1",
-    "@tetherto/pearpass-utils-password-check": "git+https://github.com/Dexterity-Works/lockwright-utils-password-check",
+    "lockwright-utils-password-check": "git+https://github.com/Dexterity-Works/lockwright-utils-password-check",
     "autopass": "~3.3.0",
     "b4a": "^1.7.3",
     "bare-buffer": "^3.4.2",

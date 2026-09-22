@@ -1,4 +1,4 @@
-import { constantTimeHashCompare } from '@tetherto/pearpass-utils-password-check'
+import { constantTimeHashCompare } from 'lockwright-utils-password-check'
 
 import {
   encryptionAdd,
