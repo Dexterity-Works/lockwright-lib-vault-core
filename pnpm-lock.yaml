@@ -274,7 +274,7 @@ importers:
         specifier: ^4.16.0
         version: 4.17.0(bare-buffer@3.6.2)(bare-url@2.4.7)
       lockwright-utils-password-check:
-        specifier: git+https://github.com/Dexterity-Works/lockwright-utils-password-check
+        specifier: git+https://github.com/Dexterity-Works/lockwright-utils-password-check.git#3fb28bee9328290a12119feaaf912d1018fcf6f8
         version: https://codeload.github.com/Dexterity-Works/lockwright-utils-password-check/tar.gz/3fb28bee9328290a12119feaaf912d1018fcf6f8
       otpauth:
         specifier: ^9.5.0

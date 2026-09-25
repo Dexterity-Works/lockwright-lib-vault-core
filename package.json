@@ -15,7 +15,7 @@
   "dependencies": {
     "@noble/ciphers": "^2.2.0",
     "@noble/hashes": "^2.0.1",
-    "lockwright-utils-password-check": "git+https://github.com/Dexterity-Works/lockwright-utils-password-check",
+    "lockwright-utils-password-check": "git+https://github.com/Dexterity-Works/lockwright-utils-password-check.git#3fb28bee9328290a12119feaaf912d1018fcf6f8",
     "autopass": "~3.3.0",
     "b4a": "^1.7.3",
     "bare-buffer": "^3.4.2",
