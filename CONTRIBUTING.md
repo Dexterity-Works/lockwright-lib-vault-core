@@ -22,3 +22,5 @@ Start small. Tests, failing and passing, help.
 ## License
 
 Contributions are licensed under the project [LICENSE](./LICENSE.md).
+
+- After cloning, run `git config core.hooksPath .husky` so the pre-commit hook runs.

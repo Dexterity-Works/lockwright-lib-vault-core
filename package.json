@@ -8,9 +8,7 @@
   "scripts": {
     "lint": "eslint .",
     "lint:fix": "eslint --fix .",
-    "test": "jest",
-    "prepare": "husky || true",
-    "preinstall": "node scripts/ensure-pnpm.mjs"
+    "test": "jest"
   },
   "dependencies": {
     "@noble/ciphers": "^2.2.0",
