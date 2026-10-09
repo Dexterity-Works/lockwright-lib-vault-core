@@ -13,7 +13,6 @@
   "dependencies": {
     "@noble/ciphers": "^2.2.0",
     "@noble/hashes": "^2.0.1",
-    "lockwright-utils-password-check": "git+https://github.com/Dexterity-Works/lockwright-utils-password-check.git#3fb28bee9328290a12119feaaf912d1018fcf6f8",
     "autopass": "~3.3.0",
     "b4a": "^1.7.3",
     "bare-buffer": "^3.4.2",
@@ -54,12 +53,14 @@
     "globals": "15.14.0",
     "husky": "^9.1.7",
     "jest": "30.2.0",
+    "lockwright-lib-utils": "git+https://github.com/Dexterity-Works/lockwright-lib-utils.git#93ccdd5601caede2049f484f79acd0f88d9f4a89",
     "prettier": "3.4.2"
   },
   "optionalDependencies": {
     "@tetherto/swarmconf": "^1.0.0"
   },
   "peerDependencies": {
+    "lockwright-lib-utils": "*",
     "sentry-bare": "^0.2.0"
   },
   "peerDependenciesMeta": {

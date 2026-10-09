@@ -1,4 +1,4 @@
-import * as constantTimeHashCompareModule from 'lockwright-utils-password-check'
+import * as constantTimeHashCompareModule from 'lockwright-lib-utils/password-check'
 
 import * as appDeps from './appDeps'
 import * as decryptVaultKeyModule from './decryptVaultKey'
@@ -48,7 +48,7 @@ jest.mock('./hashPassword', () => ({
   hashPassword: jest.fn()
 }))
 
-jest.mock('lockwright-utils-password-check', () => ({
+jest.mock('lockwright-lib-utils/password-check', () => ({
   constantTimeHashCompare: jest.fn()
 }))
 
