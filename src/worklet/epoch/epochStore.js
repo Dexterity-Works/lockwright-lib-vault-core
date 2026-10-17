@@ -36,12 +36,14 @@ const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x))
  * @param {{
  *   instance: import('autopass')
  *   getPersonalKeyPair: () => Promise<{ publicKey: Buffer, secretKey: Buffer }>
+ *   vaultId?: string | null
  *   logger?: { warn: (message: string, details?: object) => void }
  * }} opts
  */
 export const createEpochStore = ({
   instance,
   getPersonalKeyPair,
+  vaultId = null,
   logger = noopLogger
 }) => {
   let roster = []
@@ -289,6 +291,7 @@ export const createEpochStore = ({
     const { latest } = epochs
     const canRead = !latest || !!ring[latest.id]
     return {
+      vaultId,
       epoch: latest ? latest.id : null,
       seq: latest ? latest.seq : 0,
       legacy: !latest,

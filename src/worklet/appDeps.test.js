@@ -1172,7 +1172,11 @@ describe('appDeps module functions (excluding encryption)', () => {
       await appDeps.activeVaultEnsureEpoch({ start: true })
       await fireUpdate()
       expect(pushes).toHaveLength(1)
-      expect(pushes[0]).toMatchObject({ legacy: false, members: ['me'] })
+      expect(pushes[0]).toMatchObject({
+        vaultId: 'vault1',
+        legacy: false,
+        members: ['me']
+      })
 
       await fireUpdate()
       expect(pushes).toHaveLength(1)

@@ -444,8 +444,18 @@ const runEpochSync = async ({ ensure }) => {
       await store.ensureEpoch({ start: false })
     }
     const status = await store.status()
-    const { epoch, seq, legacy, canRead, revoked, members, uncovered } = status
+    const {
+      vaultId,
+      epoch,
+      seq,
+      legacy,
+      canRead,
+      revoked,
+      members,
+      uncovered
+    } = status
     const json = JSON.stringify({
+      vaultId,
       epoch,
       seq,
       legacy,
@@ -684,6 +694,7 @@ export const initActiveVaultInstance = async ({ id, encryptionKey }) => {
     epochStore = createEpochStore({
       instance: activeVaultInstance,
       getPersonalKeyPair,
+      vaultId: id,
       logger: workletLogger
     })
 
