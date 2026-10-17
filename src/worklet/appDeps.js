@@ -1311,11 +1311,6 @@ export const activeVaultEnsureEpoch = async ({ start = false } = {}) => {
   if (!isActiveVaultInitialized || !epochStore) {
     throw new Error('Vault not initialised')
   }
-  // The store hands a caller the rotation already in flight, whatever its
-  // options. Let a background start:false finish so kick and leave are not
-  // answered with 'legacy'.
-  while (start && epochSync) await epochSync
-  if (!epochStore) throw new Error('Vault not initialised')
   return epochStore.ensureEpoch({ start })
 }
 

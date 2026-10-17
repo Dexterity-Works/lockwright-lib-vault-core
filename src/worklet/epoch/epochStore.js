@@ -55,6 +55,8 @@ export const createEpochStore = ({
   let refreshedAt = -1
   let refreshing = Promise.resolve()
   let ensuring = null
+  /** @type {{ start: boolean, promise: Promise<object> } | null} */
+  let queued = null
 
   instance.on('update', () => {
     updates++
@@ -273,16 +275,34 @@ export const createEpochStore = ({
     return rotate(sealable, uncovered, keyPair)
   }
 
+  const runEnsure = (start) => {
+    const run = doEnsureEpoch({ start }).finally(() => {
+      if (ensuring === run) ensuring = null
+    })
+    ensuring = run
+    return run
+  }
+
   /**
+   * One run at a time. Callers that arrive during a run share exactly one
+   * follow-up run, which starts an epoch if any of them asked to.
    * @param {{ start?: boolean }} [opts]
    */
-  const ensureEpoch = (opts) => {
-    if (!ensuring) {
-      ensuring = doEnsureEpoch(opts).finally(() => {
-        ensuring = null
-      })
+  const ensureEpoch = ({ start = false } = {}) => {
+    if (queued) {
+      queued.start ||= start
+      return queued.promise
     }
-    return ensuring
+    if (!ensuring) return runEnsure(start)
+    const next = { start }
+    next.promise = ensuring
+      .catch(() => {})
+      .then(() => {
+        queued = null
+        return runEnsure(next.start)
+      })
+    queued = next
+    return next.promise
   }
 
   const status = async () => {

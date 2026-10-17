@@ -352,17 +352,30 @@ describe('epochStore over real Autopass', () => {
       A.store.ensureEpoch({ start: true }),
       A.store.ensureEpoch({ start: true })
     ])
-    expect(one).toBe(two)
     expect(one).toMatchObject({
       rotated: true,
       members: ['A'],
       uncovered: ['L']
     })
+    expect(two).toMatchObject({ rotated: false, reason: 'current' })
     const epochs = await A.store.find({
       gte: { key: 'epoch/' },
       lt: { key: 'epoch0' }
     })
     expect(epochs).toHaveLength(1)
+  })
+
+  it('runs a start:true call that lands during a start:false run', async () => {
+    const [A] = await setup(['A'])
+
+    const background = A.store.ensureEpoch({ start: false })
+    const kickCall = A.store.ensureEpoch({ start: true })
+    const waiter = A.store.ensureEpoch({ start: false })
+
+    expect(await background).toMatchObject({ rotated: false, reason: 'legacy' })
+    expect(await kickCall).toMatchObject({ rotated: true, seq: 1 })
+    expect(await waiter).toBe(await kickCall)
+    expect((await A.store.status()).legacy).toBe(false)
   })
 
   it('reports revoked for a kicked device that held a key', async () => {
