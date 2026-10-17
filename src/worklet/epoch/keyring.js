@@ -8,6 +8,14 @@ export class EpochKeyUnavailableError extends Error {
   }
 }
 
+/** The latest epoch is sealed to someone outside the roster, or missing. */
+export class EpochRotationPendingError extends Error {
+  constructor() {
+    super('The vault epoch must rotate before this write')
+    this.name = 'EpochRotationPendingError'
+  }
+}
+
 export class EpochDecryptError extends Error {
   constructor(message = 'Epoch envelope failed to decrypt') {
     super(message)

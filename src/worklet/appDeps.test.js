@@ -1135,9 +1135,14 @@ describe('appDeps module functions (excluding encryption)', () => {
         id,
         seq: 1,
         prev: null,
-        members: sealRing({ [id]: generateEpochKey() }, [
-          { id: 'other', masterTopic: other.publicKey.toString('hex') }
-        ]),
+        members: {
+          other: {
+            topic: other.publicKey.toString('hex'),
+            box: sealRing({ [id]: generateEpochKey() }, [
+              { id: 'other', masterTopic: other.publicKey.toString('hex') }
+            ]).other
+          }
+        },
         personalKeyPair: other
       })
       vault.put(`epoch/${id}`, JSON.stringify(record))
@@ -1151,6 +1156,18 @@ describe('appDeps module functions (excluding encryption)', () => {
         canRead: false,
         revoked: false
       })
+    })
+
+    test('activeVaultAdd refuses to write under an epoch that still lists a removed device', async () => {
+      vault.put('device/other', deviceRow('other', makeSignKeyPair()))
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      vault.rows.delete('device/other')
+      appDeps.getActiveVaultInstance().base.writable = false
+
+      await expect(
+        appDeps.activeVaultAdd('note/1', { title: 'x' })
+      ).rejects.toThrow('Vault key must rotate first')
+      expect(vault.rows.has('note/1')).toBe(false)
     })
 
     test('the update listener rotates when needed and pushes status only on change', async () => {

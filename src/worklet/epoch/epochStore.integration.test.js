@@ -509,4 +509,62 @@ describe('epochStore over real Autopass', () => {
       uncovered: ['0']
     })
   })
+
+  it('rotates before writing when the roster shrank but the epoch did not', async () => {
+    const [A, B, C] = await setup()
+    await A.store.ensureEpoch({ start: true })
+    await sync(A, B, C)
+
+    // The roster shrink reaches B before any rotation does.
+    await A.store.remove('device/C')
+    await sync(A, B)
+    await B.store.add('record/s', 'secret')
+    expect((await rawEnvelope(B, 'record/s')).$enc).toBe(1)
+    await sync(A, B, C)
+
+    expect(await value(A, 'record/s')).toBe('secret')
+    expect(await C.store.get('record/s')).toBeNull()
+    expect((await B.store.status()).members).toEqual(['A', 'B'])
+  })
+
+  it('keeps an epoch whose author left and never falls back to plaintext', async () => {
+    const [A, B, C] = await setup()
+    await C.store.ensureEpoch({ start: true })
+    await C.store.add('record/c', 'from C')
+    await sync(A, B, C)
+
+    await A.store.remove('device/C')
+    await sync(A, B)
+    expect((await B.store.status()).legacy).toBe(false)
+    await B.store.add('record/b', 'from B')
+    expect((await rawEnvelope(B, 'record/b')).$enc).toBe(1)
+    await sync(A, B, C)
+
+    expect(await value(B, 'record/c')).toBe('from C')
+    expect(await value(A, 'record/b')).toBe('from B')
+    expect(await C.store.get('record/b')).toBeNull()
+    expect(await B.store.status()).toMatchObject({
+      legacy: false,
+      canRead: true,
+      seq: 2
+    })
+  })
+
+  it('resolves a vault whose first author left after a later rotation', async () => {
+    const [A, B, C] = await setup()
+    await C.store.ensureEpoch({ start: true })
+    await C.store.add('record/c', 'from C')
+    await sync(A, B, C)
+
+    const result = await kick(A, C)
+    expect(result).toMatchObject({ rotated: true, seq: 2 })
+    await sync(A, B)
+
+    expect(await B.store.status()).toMatchObject({
+      epoch: result.id,
+      seq: 2,
+      canRead: true
+    })
+    expect(await value(B, 'record/c')).toBe('from C')
+  })
 })

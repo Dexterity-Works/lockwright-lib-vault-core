@@ -6,6 +6,7 @@ import {
 import {
   canSealTo,
   EpochKeyUnavailableError,
+  EpochRotationPendingError,
   decryptValue,
   encryptValue,
   generateEpochKey,
@@ -47,8 +48,8 @@ export const createEpochStore = ({
   logger = noopLogger
 }) => {
   let roster = []
-  let epochs = { valid: [], latest: null }
-  const ring = {}
+  let epochs = { signed: [], valid: [], latest: null, highSeq: 0 }
+  const ring = Object.create(null)
   const openedRecords = new Set()
   const loggedKeys = new Set()
   let updates = 0
@@ -106,17 +107,21 @@ export const createEpochStore = ({
     const next = resolveEpochs(records, nextRoster)
 
     for (const { key, value } of records) {
-      if (!next.valid.includes(value)) {
+      if (!next.signed.includes(value)) {
         logOnce(key, 'epochStore: ignoring invalid epoch record')
       }
     }
 
-    for (const record of next.valid) {
+    // Any signed record may hold a box for me, even one whose author is no
+    // longer trusted: opening it never hurts.
+    const myTopic = keyPair.publicKey.toString('hex')
+    for (const record of next.signed) {
       const cacheKey = `${record.id}:${record.sig}`
       if (openedRecords.has(cacheKey)) continue
       openedRecords.add(cacheKey)
-      for (const sealed of Object.values(record.members)) {
-        const opened = openRing(sealed, keyPair)
+      for (const { topic, box } of Object.values(record.members)) {
+        if (topic !== myTopic) continue
+        const opened = openRing(box, keyPair)
         if (!opened) continue
         for (const [epochId, key] of Object.entries(opened)) {
           if (!(epochId in ring)) ring[epochId] = key
@@ -171,9 +176,20 @@ export const createEpochStore = ({
     // Always re-resolve before a write: a stale epoch would leak the value
     // to a device that was just removed.
     await refresh()
-    const { latest } = epochs
-    if (!latest || isPlaintextKey(key)) return instance.add(key, value, file)
+    if (isPlaintextKey(key) || !epochs.signed.length) {
+      return instance.add(key, value, file)
+    }
 
+    if (isStale()) {
+      const keyPair = await getPersonalKeyPair()
+      const canRotate =
+        instance.base.writable &&
+        coverage().sealable.some((row) => isMe(row.masterTopic, keyPair))
+      if (canRotate) await ensureEpoch({ start: true })
+      if (isStale()) throw new EpochRotationPendingError()
+    }
+
+    const { latest } = epochs
     if (!ring[latest.id]) throw new EpochKeyUnavailableError(latest.id)
     const sealed = encryptValue(latest.id, ring[latest.id], value, file)
     return instance.add(key, sealed.envelope, sealed.file)
@@ -226,19 +242,46 @@ export const createEpochStore = ({
     return { sealable: [...sealable.values()], uncovered }
   }
 
+  const memberPairs = (record) =>
+    Object.entries(record.members).map(([id, { topic }]) => `${id}:${topic}`)
+
+  const sealablePairs = (sealable) =>
+    sealable.map((row) => `${row.id}:${row.masterTopic.toLowerCase()}`)
+
+  // Never write under an epoch sealed to someone outside the roster. Once a
+  // signed epoch exists, a missing latest means a rotation is owed too.
+  const isStale = () => {
+    const { latest, signed } = epochs
+    if (!signed.length) return false
+    if (!latest) return true
+    const allowed = sealablePairs(coverage().sealable)
+    return !memberPairs(latest).every((pair) => allowed.includes(pair))
+  }
+
   const isMe = (masterTopic, keyPair) =>
     typeof masterTopic === 'string' &&
     masterTopic.toLowerCase() === keyPair.publicKey.toString('hex')
 
   const rotate = async (sealable, uncovered, keyPair) => {
-    const { latest } = epochs
+    const { latest, highSeq } = epochs
     const id = generateEpochId()
     const key = generateEpochKey()
+    const boxes = sealRing({ ...ring, [id]: key }, sealable)
+    const members = {}
+    for (const row of sealable) {
+      if (boxes[row.id]) {
+        members[row.id] = {
+          topic: row.masterTopic.toLowerCase(),
+          box: boxes[row.id]
+        }
+      }
+    }
+    // Seq comes from every signed record, so latest never moves backwards.
     const record = buildEpochRecord({
       id,
-      seq: latest ? latest.seq + 1 : 1,
+      seq: highSeq + 1,
       prev: latest ? latest.id : null,
-      members: sealRing({ ...ring, [id]: key }, sealable),
+      members,
       personalKeyPair: keyPair
     })
     await instance.add(`epoch/${id}`, JSON.stringify(record))
@@ -263,18 +306,16 @@ export const createEpochStore = ({
     if (!sealable.some((row) => isMe(row.masterTopic, keyPair))) {
       return skip('self-not-in-roster')
     }
-    const { latest } = epochs
-    if (!latest)
+    const { latest, signed } = epochs
+    if (!signed.length) {
       return start ? rotate(sealable, uncovered, keyPair) : skip('legacy')
+    }
+    // No trusted latest while signed epochs exist: a rotation is owed.
+    if (!latest) return rotate(sealable, uncovered, keyPair)
     // A device that cannot open the latest ring would seal a ring without
     // the history; leave the rotation to a member that holds it.
     if (!ring[latest.id]) return skip('pending')
-    if (
-      sameSet(
-        Object.keys(latest.members),
-        sealable.map((row) => row.id)
-      )
-    ) {
+    if (sameSet(memberPairs(latest), sealablePairs(sealable))) {
       return skip('current')
     }
     return rotate(sealable, uncovered, keyPair)
@@ -329,13 +370,14 @@ export const createEpochStore = ({
   const status = async () => {
     await ensureFresh()
     const keyPair = await getPersonalKeyPair()
-    const { latest } = epochs
-    const canRead = !latest || !!ring[latest.id]
+    const { latest, signed } = epochs
+    const legacy = !signed.length
+    const canRead = legacy || (!!latest && !!ring[latest.id])
     return {
       vaultId,
       epoch: latest ? latest.id : null,
       seq: latest ? latest.seq : 0,
-      legacy: !latest,
+      legacy,
       canRead,
       // Only a device that once held a key and wrote here was let go. A
       // legacy row, a joiner whose row has not landed yet, or a kicked

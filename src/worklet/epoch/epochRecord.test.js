@@ -17,9 +17,14 @@ const at = (record) => ({ key: `epoch/${record?.id}`, value: record })
 
 describe('epochRecord', () => {
   const a = keyPair()
+  const b = keyPair()
   const outsider = keyPair()
-  const roster = [{ id: 'A', masterTopic: a.publicKey.toString('hex') }]
-  const members = { B: 'sealed-b', A: 'sealed-a' }
+  const hex = (kp) => kp.publicKey.toString('hex')
+  const roster = [{ id: 'A', masterTopic: hex(a) }]
+  const members = {
+    B: { topic: hex(b), box: 'sealed-b' },
+    A: { topic: hex(a), box: 'sealed-a' }
+  }
   const build = (opts) =>
     buildEpochRecord({
       seq: 1,
@@ -45,8 +50,9 @@ describe('epochRecord', () => {
       { seq: 2 },
       { prev: 'aa'.repeat(16) },
       { createdAt: record.createdAt + 1 },
-      { members: { ...record.members, C: 'sealed-c' } },
-      { members: { ...record.members, A: 'other' } }
+      { members: { ...record.members, C: { topic: hex(b), box: 'c' } } },
+      { members: { ...record.members, A: { topic: hex(a), box: 'other' } } },
+      { members: { ...record.members, A: { topic: hex(b), box: 'sealed-a' } } }
     ]
 
     for (const edit of edits) {
@@ -114,5 +120,41 @@ describe('epochRecord', () => {
     ]) {
       expect(resolveEpochs(order.map(at), roster).valid).toEqual([other])
     }
+  })
+
+  it('accepts authors through the members of accepted epochs', () => {
+    const c = keyPair()
+    const byA = build({
+      id: '01'.repeat(16),
+      members: {
+        A: { topic: hex(a), box: 'x' },
+        C: { topic: hex(c), box: 'x' }
+      }
+    })
+    const byC = build({
+      id: '02'.repeat(16),
+      seq: 2,
+      members: { B: { topic: hex(b), box: 'x' } },
+      personalKeyPair: c
+    })
+    const byOutsider = build({
+      id: '03'.repeat(16),
+      seq: 9,
+      personalKeyPair: outsider
+    })
+    const entries = [byOutsider, byC, byA].map(at)
+
+    const onlyB = resolveEpochs(entries, [{ id: 'B', masterTopic: hex(b) }])
+    expect(onlyB.latest).toBeNull()
+    expect(onlyB.signed.map((r) => r.id)).toEqual([
+      byA.id,
+      byC.id,
+      byOutsider.id
+    ])
+    expect(onlyB.highSeq).toBe(9)
+
+    const withA = resolveEpochs(entries, roster)
+    expect(withA.valid.map((r) => r.id)).toEqual([byA.id, byC.id])
+    expect(withA.latest).toBe(byC)
   })
 })

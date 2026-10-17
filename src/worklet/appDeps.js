@@ -8,7 +8,10 @@ import Corestore from 'corestore'
 import sodium from 'sodium-native'
 
 import { createEpochStore } from './epoch/epochStore'
-import { EpochKeyUnavailableError } from './epoch/keyring'
+import {
+  EpochKeyUnavailableError,
+  EpochRotationPendingError
+} from './epoch/keyring'
 import { getForbiddenRoots } from './getForbiddenRoots'
 import {
   generateTOTP,
@@ -974,7 +977,9 @@ export const activeVaultAdd = async (key, data, file, fileName) => {
     const err = new Error(
       error instanceof EpochKeyUnavailableError
         ? 'Vault key not available yet: another device must rotate it'
-        : error.message
+        : error instanceof EpochRotationPendingError
+          ? 'Vault key must rotate first: wait for a device that can rotate it'
+          : error.message
     )
     if (fileName) {
       err.details = { fileName }
