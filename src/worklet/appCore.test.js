@@ -306,6 +306,10 @@ import FramedStream from 'framed-stream'
 
 import { API } from './api'
 import { handleRpcCommand, setupIPC, createRPC } from './appCore'
+import {
+  EpochKeyUnavailableError,
+  EpochRotationPendingError
+} from './epoch/keyring'
 import { isPearWorker } from './utils/isPearWorker'
 import { parseRequestData } from './utils/parseRequestData'
 import { receiveFileStream } from '../utils/recieveFileStream'
@@ -842,6 +846,45 @@ describe('handleRpcCommand', () => {
 
     expect(JSON.parse(reply.mock.calls[0][0]).error).toContain(
       'Error rotating the vault epoch'
+    )
+  })
+
+  test('ACTIVE_VAULT_ENSURE_EPOCH: names a typed epoch error to the client', async () => {
+    for (const error of [
+      new EpochRotationPendingError(),
+      new EpochKeyUnavailableError('e1')
+    ]) {
+      parseRequestData.mockReturnValue({ start: true })
+      mockActiveVaultEnsureEpoch.mockRejectedValue(error)
+
+      const reply = jest.fn()
+      await handleRpcCommand({
+        command: API.ACTIVE_VAULT_ENSURE_EPOCH,
+        data: { start: true },
+        reply
+      })
+
+      const message = JSON.parse(reply.mock.calls[0][0]).error
+      expect(message).toContain(error.name)
+      expect(message).toContain(error.message)
+    }
+  })
+
+  test('ACTIVE_VAULT_ADD: passes the epoch wording through to the client', async () => {
+    const wording =
+      'Vault key must rotate first: wait for a device that can rotate it'
+    parseRequestData.mockReturnValue({ key: 'record/r1', data: {} })
+    mockActiveVaultAdd.mockRejectedValue(new Error(wording))
+
+    const reply = jest.fn()
+    await handleRpcCommand({
+      command: API.ACTIVE_VAULT_ADD,
+      data: { key: 'record/r1', data: {} },
+      reply
+    })
+
+    expect(JSON.parse(reply.mock.calls[0][0]).error).toBe(
+      `Error adding record to active vault: Error: ${wording}`
     )
   })
 
