@@ -745,7 +745,7 @@ describe('appDeps module functions (excluding encryption)', () => {
           lte: undefined,
           gt: undefined,
           lt: { key: 'actions/queue/AAA0' },
-          limit: 50,
+          // The epoch store applies the limit to readable rows itself.
           reverse: false
         }
       )

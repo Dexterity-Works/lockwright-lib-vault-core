@@ -223,14 +223,17 @@ export const createEpochStore = ({
   const find = async ({ gte, lte, gt, lt, limit, reverse } = {}) => {
     await ensureFresh()
     const results = []
+    // Unreadable rows do not count toward the limit, so read the view
+    // unbounded and stop once enough rows decoded.
+    const max = limit ?? Infinity
     for await (const record of instance.base.view.find(RECORDS, {
       gte,
       lte,
       gt,
       lt,
-      limit,
       reverse
     })) {
+      if (results.length >= max) break
       const decoded = await readOrNull(record.key, record)
       if (decoded) results.push({ key: record.key, ...decoded })
     }

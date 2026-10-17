@@ -694,4 +694,28 @@ describe('epochStore over real Autopass', () => {
       })
     ).toBe(false)
   })
+
+  it('fills a find limit with readable rows, forwards and in reverse', async () => {
+    const [A] = await setup(['A'])
+    await A.store.ensureEpoch({ start: true })
+    const unreadable = JSON.stringify({
+      $enc: 1,
+      e: 'ff'.repeat(16),
+      n: 'AA==',
+      c: 'AA=='
+    })
+    for (const n of [1, 3, 5]) await A.store.add(`record/${n}`, `v${n}`)
+    for (const n of [2, 4]) await A.instance.add(`record/${n}`, unreadable)
+    const range = { gte: { key: 'record/' }, lt: { key: 'record0' } }
+    const keys = async (opts) =>
+      (await A.store.find({ ...range, ...opts })).map((r) => r.key)
+
+    expect(await keys({ limit: 2 })).toEqual(['record/1', 'record/3'])
+    expect(await keys({ limit: 2, reverse: true })).toEqual([
+      'record/5',
+      'record/3'
+    ])
+    expect(await keys({ limit: 0 })).toEqual([])
+    expect(await keys({})).toEqual(['record/1', 'record/3', 'record/5'])
+  })
 })
