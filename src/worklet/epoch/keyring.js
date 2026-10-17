@@ -1,0 +1,229 @@
+import sodium from 'sodium-native'
+
+export class EpochKeyUnavailableError extends Error {
+  constructor(epochId) {
+    super(`No key for epoch ${epochId}`)
+    this.name = 'EpochKeyUnavailableError'
+    this.epochId = epochId
+  }
+}
+
+export class EpochDecryptError extends Error {
+  constructor(message = 'Epoch envelope failed to decrypt') {
+    super(message)
+    this.name = 'EpochDecryptError'
+  }
+}
+
+const free = (...buffers) => {
+  for (const buffer of buffers) {
+    sodium.sodium_memzero(buffer)
+    sodium.sodium_free(buffer)
+  }
+}
+
+const secureFrom = (string, encoding) => {
+  const buffer = sodium.sodium_malloc(Buffer.byteLength(string, encoding))
+  buffer.write(string, encoding)
+  return buffer
+}
+
+/**
+ * @returns {string} 32-byte secretbox key, base64
+ */
+export const generateEpochKey = () => {
+  const key = sodium.sodium_malloc(sodium.crypto_secretbox_KEYBYTES)
+  try {
+    sodium.randombytes_buf(key)
+    return key.toString('base64')
+  } finally {
+    free(key)
+  }
+}
+
+/**
+ * @param {Record<string, string>} ring epochId -> key b64
+ * @param {Array<{ id: string, masterTopic: string }>} members
+ * @returns {Record<string, string>} deviceId -> sealed box b64
+ */
+export const sealRing = (ring, members) => {
+  const message = secureFrom(JSON.stringify(ring), 'utf8')
+  const curvePk = Buffer.alloc(sodium.crypto_box_PUBLICKEYBYTES)
+  try {
+    const sealed = {}
+    for (const { id, masterTopic } of members) {
+      sodium.crypto_sign_ed25519_pk_to_curve25519(
+        curvePk,
+        Buffer.from(masterTopic, 'hex')
+      )
+      const box = Buffer.alloc(message.length + sodium.crypto_box_SEALBYTES)
+      sodium.crypto_box_seal(box, message, curvePk)
+      sealed[id] = box.toString('base64')
+    }
+    return sealed
+  } finally {
+    free(message)
+  }
+}
+
+/**
+ * @param {string} sealedB64
+ * @param {{ publicKey: Buffer, secretKey: Buffer }} personalKeyPair
+ * @returns {Record<string, string> | null}
+ */
+export const openRing = (sealedB64, personalKeyPair) => {
+  if (typeof sealedB64 !== 'string') return null
+  const box = Buffer.from(sealedB64, 'base64')
+  if (box.length <= sodium.crypto_box_SEALBYTES) return null
+
+  const curvePk = Buffer.alloc(sodium.crypto_box_PUBLICKEYBYTES)
+  const curveSk = sodium.sodium_malloc(sodium.crypto_box_SECRETKEYBYTES)
+  const plain = sodium.sodium_malloc(box.length - sodium.crypto_box_SEALBYTES)
+  try {
+    sodium.crypto_sign_ed25519_pk_to_curve25519(
+      curvePk,
+      personalKeyPair.publicKey
+    )
+    sodium.crypto_sign_ed25519_sk_to_curve25519(
+      curveSk,
+      personalKeyPair.secretKey
+    )
+    if (!sodium.crypto_box_seal_open(plain, box, curvePk, curveSk)) return null
+
+    const ring = JSON.parse(plain.toString('utf8'))
+    if (!ring || typeof ring !== 'object' || Array.isArray(ring)) return null
+    for (const key of Object.values(ring)) {
+      if (typeof key !== 'string') return null
+    }
+    return ring
+  } catch {
+    return null
+  } finally {
+    free(curveSk, plain)
+  }
+}
+
+/**
+ * @param {unknown} value Autopass value string or parsed object
+ * @returns {boolean}
+ */
+export const isEnvelope = (value) => {
+  let parsed = value
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value)
+    } catch {
+      return false
+    }
+  }
+  return !!parsed && typeof parsed === 'object' && parsed.$enc === 1
+}
+
+const seal = (bytes, key) => {
+  const nonce = Buffer.alloc(sodium.crypto_secretbox_NONCEBYTES)
+  sodium.randombytes_buf(nonce)
+  const ciphertext = Buffer.alloc(
+    bytes.length + sodium.crypto_secretbox_MACBYTES
+  )
+  sodium.crypto_secretbox_easy(ciphertext, bytes, nonce, key)
+  return { nonce, ciphertext }
+}
+
+const open = (ciphertext, nonceB64, key) => {
+  const nonce = Buffer.from(nonceB64 || '', 'base64')
+  if (
+    nonce.length !== sodium.crypto_secretbox_NONCEBYTES ||
+    ciphertext.length < sodium.crypto_secretbox_MACBYTES
+  ) {
+    throw new EpochDecryptError()
+  }
+  const plain = sodium.sodium_malloc(
+    ciphertext.length - sodium.crypto_secretbox_MACBYTES
+  )
+  if (!sodium.crypto_secretbox_open_easy(plain, ciphertext, nonce, key)) {
+    free(plain)
+    throw new EpochDecryptError()
+  }
+  return plain
+}
+
+const readKey = (keyB64) => {
+  if (
+    Buffer.byteLength(keyB64, 'base64') !== sodium.crypto_secretbox_KEYBYTES
+  ) {
+    throw new EpochDecryptError('Epoch key has the wrong length')
+  }
+  return secureFrom(keyB64, 'base64')
+}
+
+/**
+ * @param {string} epochId
+ * @param {string} keyB64
+ * @param {string} plaintext
+ * @param {Buffer} [fileBuffer]
+ * @returns {{ envelope: string, file?: Buffer }}
+ */
+export const encryptValue = (epochId, keyB64, plaintext, fileBuffer) => {
+  const key = readKey(keyB64)
+  const message = secureFrom(plaintext, 'utf8')
+  try {
+    const value = seal(message, key)
+    const envelope = {
+      $enc: 1,
+      e: epochId,
+      n: value.nonce.toString('base64'),
+      c: value.ciphertext.toString('base64')
+    }
+    if (!fileBuffer) return { envelope: JSON.stringify(envelope) }
+
+    const file = seal(fileBuffer, key)
+    envelope.fn = file.nonce.toString('base64')
+    return { envelope: JSON.stringify(envelope), file: file.ciphertext }
+  } finally {
+    free(key, message)
+  }
+}
+
+/**
+ * @param {string | object} envelope
+ * @param {Record<string, string>} ring
+ * @param {Buffer | null} [fileBuffer]
+ * @returns {{ value: string, file?: Buffer }}
+ * @throws {EpochKeyUnavailableError | EpochDecryptError}
+ */
+export const decryptValue = (envelope, ring, fileBuffer) => {
+  let parsed = envelope
+  if (typeof envelope === 'string') {
+    try {
+      parsed = JSON.parse(envelope)
+    } catch {
+      throw new EpochDecryptError('Envelope is not JSON')
+    }
+  }
+  if (!isEnvelope(parsed) || typeof parsed.c !== 'string') {
+    throw new EpochDecryptError('Not an epoch envelope')
+  }
+  const keyB64 = ring[parsed.e]
+  if (typeof keyB64 !== 'string') throw new EpochKeyUnavailableError(parsed.e)
+  if (!parsed.fn !== !fileBuffer) {
+    throw new EpochDecryptError('Envelope and attached file disagree')
+  }
+
+  const key = readKey(keyB64)
+  let plain = null
+  try {
+    plain = open(Buffer.from(parsed.c, 'base64'), parsed.n, key)
+    const value = plain.toString('utf8')
+    if (!fileBuffer) return { value }
+
+    const filePlain = open(fileBuffer, parsed.fn, key)
+    try {
+      return { value, file: Buffer.from(filePlain) }
+    } finally {
+      free(filePlain)
+    }
+  } finally {
+    free(key)
+    if (plain) free(plain)
+  }
+}
