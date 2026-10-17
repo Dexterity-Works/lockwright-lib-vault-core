@@ -1448,6 +1448,16 @@ describe('appDeps module functions (excluding encryption)', () => {
         expect(vault.rows.get('record-v2/r1/file/f1').value).toBe(unreadable)
       })
 
+      test('mirrors a v1 delete made while it could not read the record', async () => {
+        const fireUpdate = await seenRecord()
+        vault.put('record/r1', unreadable)
+        await fireUpdate()
+        vault.rows.delete('record/r1')
+        await fireUpdate()
+
+        expect(vault.rows.has('record-v2/r1')).toBe(false)
+      })
+
       test('deletes nothing while the latest epoch is unreadable here', async () => {
         const fireUpdate = await seenRecord()
         const { epoch } = await appDeps.activeVaultGetEpochStatus()
