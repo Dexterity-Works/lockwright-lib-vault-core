@@ -159,6 +159,19 @@ describe('epochRecord', () => {
     expect(verifySignature(record)).toBe(true)
   })
 
+  it('rejects fields the signature does not cover, at either level', () => {
+    const record = build()
+    const extraMember = {
+      ...record,
+      members: { ...record.members, A: { ...record.members.A, note: 'x' } }
+    }
+
+    for (const bad of [{ ...record, note: 'x' }, extraMember]) {
+      expect(verifySignature(bad)).toBe(false)
+      expect(resolveEpochs([at(bad)], roster).signed).toEqual([])
+    }
+  })
+
   it('rejects a record signed by a key that is not a valid Ed25519 point', () => {
     const record = build()
     for (const by of [

@@ -75,15 +75,33 @@ export const buildEpochRecord = ({
   return { ...record, sig: sig.toString('hex') }
 }
 
+// Only signed fields: anything else would ride along unsigned.
+const RECORD_FIELDS = [
+  'v',
+  'id',
+  'seq',
+  'prev',
+  'createdAt',
+  'by',
+  'members',
+  'sig'
+]
+const MEMBER_FIELDS = ['topic', 'box']
+
+const hasOnly = (object, fields) =>
+  Object.keys(object).every((field) => fields.includes(field))
+
 const isMember = (member) =>
   !!member &&
   typeof member === 'object' &&
+  hasOnly(member, MEMBER_FIELDS) &&
   isHex(member.topic, 64) &&
   typeof member.box === 'string'
 
 const isWellFormed = (record) =>
   !!record &&
   typeof record === 'object' &&
+  hasOnly(record, RECORD_FIELDS) &&
   record.v === VERSION &&
   isHex(record.id, 32) &&
   Number.isSafeInteger(record.seq) &&
