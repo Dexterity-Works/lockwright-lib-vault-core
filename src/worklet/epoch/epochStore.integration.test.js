@@ -156,8 +156,9 @@ describe('epochStore over real Autopass', () => {
     expect(await value(B, 'record/x')).toBe('{"title":"x"}')
     expect((await rawEnvelope(C, 'record/x')).$enc).toBe(1)
     expect(await C.store.get('record/x')).toBeNull()
+    // C never held an epoch key, so it cannot tell a kick from a pending join.
     expect(await C.store.status()).toMatchObject({
-      revoked: true,
+      revoked: false,
       canRead: false
     })
     expect(await value(C, 'record/legacy')).toBe('{"title":"legacy"}')
@@ -362,5 +363,46 @@ describe('epochStore over real Autopass', () => {
       lt: { key: 'epoch0' }
     })
     expect(epochs).toHaveLength(1)
+  })
+
+  it('reports revoked for a kicked device that held a key', async () => {
+    const [A, B, C] = await setup()
+    await A.store.ensureEpoch({ start: true })
+    await sync(A, B, C)
+    expect((await C.store.status()).canRead).toBe(true)
+
+    await kick(A, C)
+    await A.store.add('record/x', '{}')
+    await sync(A, B, C)
+
+    expect(await C.store.status()).toMatchObject({
+      canRead: false,
+      revoked: true
+    })
+    expect((await B.store.status()).revoked).toBe(false)
+  })
+
+  it('does not report revoked for a legacy row or a joiner without a row', async () => {
+    const A = await makePeer('A')
+    const L = await makePeer('L', A)
+    const D = await makePeer('D', A)
+    await A.instance.addWriter(L.instance.writerKey)
+    await A.instance.addWriter(D.instance.writerKey)
+    await addDevice(A, A.row)
+    await addDevice(A, { id: 'L', writerKey: L.row.writerKey })
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      rotated: true,
+      members: ['A'],
+      uncovered: ['L']
+    })
+    await sync(A, L, D)
+
+    for (const peer of [L, D]) {
+      expect(await peer.store.status()).toMatchObject({
+        legacy: false,
+        canRead: false,
+        revoked: false
+      })
+    }
   })
 })

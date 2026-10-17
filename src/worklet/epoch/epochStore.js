@@ -296,9 +296,12 @@ export const createEpochStore = ({
       seq: latest ? latest.seq : 0,
       legacy: !latest,
       canRead,
+      // Only a device that once held a key was let go; a legacy row or a
+      // joiner whose row has not landed yet is waiting, not revoked.
       revoked:
         !!latest &&
         !canRead &&
+        Object.keys(ring).length > 0 &&
         !roster.some((row) => isMe(row.masterTopic, keyPair)),
       members: latest ? Object.keys(latest.members).sort() : [],
       uncovered: coverage().uncovered
