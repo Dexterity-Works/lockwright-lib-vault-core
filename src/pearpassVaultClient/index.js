@@ -68,6 +68,22 @@ export class PearpassVaultClient extends EventEmitter {
 
           break
 
+        case API.ON_EPOCH_STATUS:
+          try {
+            const raw = req.data
+            const text =
+              typeof raw === 'string'
+                ? raw
+                : raw
+                  ? b4a.toString(raw, 'utf8')
+                  : '{}'
+            this.emit('epoch-status', JSON.parse(text))
+          } catch (err) {
+            this._logger.error('Failed to parse epoch-status payload', err)
+          }
+
+          break
+
         case API.ON_PERSONAL_SWARM_ERROR:
           try {
             const raw = req.data
@@ -508,6 +524,29 @@ export class PearpassVaultClient extends EventEmitter {
     return this._handleRequest({
       command: API.ACTIVE_VAULT_REMOVE_WRITER,
       data: { writerKey }
+    })
+  }
+
+  /**
+   * Rotates the active vault's epoch key when the roster changed. With
+   * `start`, creates the first epoch of a legacy plaintext vault.
+   * @param {{ start?: boolean }} [options]
+   * @returns {Promise<{ rotated: boolean, reason?: string, id?: string, seq?: number, members?: string[], uncovered: string[] }>}
+   */
+  async activeVaultEnsureEpoch({ start = false } = {}) {
+    return this._handleRequest({
+      command: API.ACTIVE_VAULT_ENSURE_EPOCH,
+      data: { start }
+    })
+  }
+
+  /**
+   * The active vault's epoch status. Also pushed as the 'epoch-status' event.
+   * @returns {Promise<{ epoch: string | null, seq: number, legacy: boolean, canRead: boolean, revoked: boolean, members: string[], uncovered: string[] }>}
+   */
+  async activeVaultGetEpochStatus() {
+    return this._handleRequest({
+      command: API.ACTIVE_VAULT_GET_EPOCH_STATUS
     })
   }
 

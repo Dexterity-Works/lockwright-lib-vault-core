@@ -74,7 +74,10 @@ jest.mock('../worklet/api', () => ({
     ACTIVE_VAULT_FILE_ADD: 'ACTIVE_VAULT_FILE_ADD',
     ACTIVE_VAULT_FILE_GET: 'ACTIVE_VAULT_FILE_GET',
     ACTIVE_VAULT_FILE_REMOVE: 'ACTIVE_VAULT_FILE_REMOVE',
-    SET_LOG_OPTIONS: 'SET_LOG_OPTIONS'
+    SET_LOG_OPTIONS: 'SET_LOG_OPTIONS',
+    ACTIVE_VAULT_ENSURE_EPOCH: 'ACTIVE_VAULT_ENSURE_EPOCH',
+    ACTIVE_VAULT_GET_EPOCH_STATUS: 'ACTIVE_VAULT_GET_EPOCH_STATUS',
+    ON_EPOCH_STATUS: 'ON_EPOCH_STATUS'
   },
   API_BY_VALUE: {
     ON_UPDATE: 'ON_UPDATE',
@@ -126,7 +129,10 @@ jest.mock('../worklet/api', () => ({
     ACTIVE_VAULT_FILE_ADD: 'ACTIVE_VAULT_FILE_ADD',
     ACTIVE_VAULT_FILE_GET: 'ACTIVE_VAULT_FILE_GET',
     ACTIVE_VAULT_FILE_REMOVE: 'ACTIVE_VAULT_FILE_REMOVE',
-    SET_LOG_OPTIONS: 'SET_LOG_OPTIONS'
+    SET_LOG_OPTIONS: 'SET_LOG_OPTIONS',
+    ACTIVE_VAULT_ENSURE_EPOCH: 'ACTIVE_VAULT_ENSURE_EPOCH',
+    ACTIVE_VAULT_GET_EPOCH_STATUS: 'ACTIVE_VAULT_GET_EPOCH_STATUS',
+    ON_EPOCH_STATUS: 'ON_EPOCH_STATUS'
   }
 }))
 
@@ -367,6 +373,46 @@ describe('PearpassVaultClient', () => {
       data: expect.objectContaining({ logFile: '/var/log/x.log' })
     })
     handleSpy.mockRestore()
+  })
+
+  it('epoch methods send their command and payload', async () => {
+    const handleSpy = jest
+      .spyOn(client, '_handleRequest')
+      .mockResolvedValue(null)
+
+    await client.activeVaultEnsureEpoch({ start: true })
+    expect(handleSpy).toHaveBeenLastCalledWith({
+      command: API.ACTIVE_VAULT_ENSURE_EPOCH,
+      data: { start: true }
+    })
+
+    await client.activeVaultEnsureEpoch()
+    expect(handleSpy).toHaveBeenLastCalledWith({
+      command: API.ACTIVE_VAULT_ENSURE_EPOCH,
+      data: { start: false }
+    })
+
+    await client.activeVaultGetEpochStatus()
+    expect(handleSpy).toHaveBeenLastCalledWith({
+      command: API.ACTIVE_VAULT_GET_EPOCH_STATUS
+    })
+
+    handleSpy.mockRestore()
+  })
+
+  it('emits epoch-status when the worklet pushes ON_EPOCH_STATUS', () => {
+    const RPC = require('bare-rpc')
+    const handler = RPC.mock.calls.at(-1)[1]
+    const spy = jest.fn()
+    client.on('epoch-status', spy)
+
+    const status = { epoch: 'e1', revoked: false }
+    handler({
+      command: API.ON_EPOCH_STATUS,
+      data: Buffer.from(JSON.stringify(status))
+    })
+
+    expect(spy).toHaveBeenCalledWith(status)
   })
 
   it('activeVaultList omits otp codes unless asked', async () => {
