@@ -806,6 +806,33 @@ describe('epochStore over real Autopass', () => {
     expect(await value(B, 'record/c')).toBe('from C')
   })
 
+  it('keeps the epoch mode and later keys when a member deletes the genesis', async () => {
+    const [A, B, C] = await setup()
+    const first = await A.store.ensureEpoch({ start: true })
+    await addDevice(A, rowFor('D', makeKeyPair()))
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      seq: 2
+    })
+    await A.store.add('record/r2', 'v2')
+    await sync(A, B, C)
+
+    // A current member removes the genesis row behind the store's back.
+    await C.instance.remove(`epoch/${first.id}`)
+    await sync(A, B, C)
+
+    expect(await B.store.status()).toMatchObject({
+      legacy: false,
+      epoch: null
+    })
+    await B.store.add('record/b', 'from B')
+    expect((await rawEnvelope(B, 'record/b')).$enc).toBe(1)
+    expect(await B.store.status()).toMatchObject({ legacy: false, seq: 1 })
+    expect(await value(B, 'record/r2')).toBe('v2')
+    await sync(A, B)
+    expect(await value(A, 'record/b')).toBe('from B')
+  })
+
   it('refuses add and remove on epoch keys', async () => {
     const [A] = await setup(['A'])
     const { id } = await A.store.ensureEpoch({ start: true })
@@ -1069,7 +1096,8 @@ describe('epochStore over real Autopass', () => {
       )
       await store.refresh()
       expect(epochVerifies()).toBe(2)
-      expect((await store.status()).legacy).toBe(true)
+      // Refused, but the row still ends plaintext mode.
+      expect(await store.status()).toMatchObject({ legacy: false, epoch: null })
     } finally {
       verify.mockRestore()
     }

@@ -68,7 +68,9 @@ export const createEpochStore = ({
   logger = noopLogger
 }) => {
   let roster = []
-  let epochs = { signed: [], accepted: [], latest: null }
+  let epochs = { valid: [], accepted: [], latest: null }
+  // No row under `epoch/` at all, valid or not: plaintext mode.
+  let legacy = true
   // epochId -> key b64, only keys that open their record's check.
   let ring = Object.create(null)
   // epochId -> every key b64 an opened box offered for it.
@@ -112,6 +114,8 @@ export const createEpochStore = ({
           raw: record.value
         })
       } catch {
+        // Kept, so an unparsable epoch row still ends plaintext mode.
+        rows.push({ key: record.key, value: null, raw: record.value })
         logOnce(record.key, 'epochStore: unparsable row')
       }
     }
@@ -152,15 +156,15 @@ export const createEpochStore = ({
     const next = resolveEpochs(records, nextRoster, { verify: verifyOnce })
 
     for (const { key, value } of records) {
-      if (!next.signed.includes(value)) {
+      if (!next.valid.includes(value)) {
         logOnce(key, 'epochStore: ignoring invalid epoch record')
       }
     }
 
-    // Any signed record may hold a box for me, whoever wrote it: a key it
+    // Any valid record may hold a box for me, whoever wrote it: a key it
     // offers counts only once it opens the check of the epoch it names.
     const myTopic = keyPair.publicKey.toString('hex')
-    for (const record of next.signed) {
+    for (const record of next.valid) {
       const cacheKey = `${record.id}:${record.sig}`
       if (openedRecords.has(cacheKey)) continue
       openedRecords.add(cacheKey)
@@ -173,7 +177,7 @@ export const createEpochStore = ({
       }
     }
     const nextRing = Object.create(null)
-    for (const record of next.signed) {
+    for (const record of next.valid) {
       for (const key of offered.get(record.id) ?? []) {
         if (opensCheck(record.check, key)) {
           nextRing[record.id] = key
@@ -185,6 +189,7 @@ export const createEpochStore = ({
     ring = nextRing
     roster = nextRoster
     epochs = next
+    legacy = records.length === 0
     refreshedAt = startedAt
   }
 
@@ -250,7 +255,7 @@ export const createEpochStore = ({
     // Always re-resolve before a write: a stale epoch would leak the value
     // to a device that was just removed.
     await refresh()
-    if (isPlaintextKey(key) || !epochs.signed.length) {
+    if (isPlaintextKey(key) || legacy) {
       return instance.add(key, value, file)
     }
 
@@ -343,11 +348,11 @@ export const createEpochStore = ({
   const sealablePairs = (sealable) =>
     sealable.map((row) => `${row.id}:${row.masterTopic.toLowerCase()}`)
 
-  // Never write under an epoch sealed to someone outside the roster. Once a
-  // signed epoch exists, a missing latest means a rotation is owed too.
+  // Never write under an epoch sealed to someone outside the roster. Once an
+  // epoch row exists, a missing latest means a rotation is owed too.
   const isStale = () => {
-    const { latest, signed } = epochs
-    if (!signed.length) return false
+    if (legacy) return false
+    const { latest } = epochs
     if (!latest) return true
     const allowed = sealablePairs(coverage().sealable)
     return !memberPairs(latest).every((pair) => allowed.includes(pair))
@@ -414,12 +419,10 @@ export const createEpochStore = ({
     if (!sealable.some((row) => isMe(row.masterTopic, keyPair))) {
       return skip('self-not-in-roster')
     }
-    const { latest, signed } = epochs
-    if (!signed.length) {
-      return start ? rotateNow() : skip('legacy')
-    }
-    // No epoch by a roster member while signed epochs exist: a rotation is
-    // owed.
+    if (legacy) return start ? rotateNow() : skip('legacy')
+    const { latest } = epochs
+    // No chained epoch by a roster member while epoch rows exist: a
+    // rotation is owed.
     if (!latest) return rotateNow()
     // A device that cannot open the latest ring would seal a ring without
     // the history; leave the rotation to a member that holds it.
@@ -521,8 +524,7 @@ export const createEpochStore = ({
   const status = async () => {
     await ensureFresh()
     const keyPair = await getPersonalKeyPair()
-    const { latest, signed } = epochs
-    const legacy = !signed.length
+    const { latest } = epochs
     const canRead = legacy || (!!latest && !!ring[latest.id])
     return {
       vaultId,

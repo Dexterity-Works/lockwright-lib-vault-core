@@ -197,7 +197,7 @@ describe('epochRecord', () => {
 
     for (const bad of [...signed, ...edited]) {
       expect(verifySignature(bad)).toBe(false)
-      expect(resolveEpochs([at(bad)], roster).signed).toEqual([])
+      expect(resolveEpochs([at(bad)], roster).valid).toEqual([])
     }
     expect(verifySignature(record)).toBe(true)
   })
@@ -211,11 +211,11 @@ describe('epochRecord', () => {
 
     for (const bad of [{ ...record, note: 'x' }, extraMember]) {
       expect(verifySignature(bad)).toBe(false)
-      expect(resolveEpochs([at(bad)], roster).signed).toEqual([])
+      expect(resolveEpochs([at(bad)], roster).valid).toEqual([])
     }
   })
 
-  it('keeps only records that chain to a signed record one seq below', () => {
+  it('accepts only records that chain to a valid record one seq below', () => {
     const one = build({ id: '01'.repeat(16) })
     const two = build({ id: '02'.repeat(16), seq: 2, prev: one.id })
     const three = build({ id: '03'.repeat(16), seq: 3, prev: two.id })
@@ -229,12 +229,14 @@ describe('epochRecord', () => {
       build({ id: '0f'.repeat(16), seq: 3, prev: '0d'.repeat(16) })
     ]
 
-    const { signed, latest } = resolveEpochs(
+    const { valid, accepted, latest } = resolveEpochs(
       [three, ...unchained, two, one].map(at),
       roster
     )
-    expect(signed.map((r) => r.id)).toEqual([one.id, two.id, three.id])
+    expect(accepted.map((r) => r.id)).toEqual([one.id, two.id, three.id])
     expect(latest).toBe(three)
+    // The chain gates the write epoch only: every key stays openable.
+    expect(valid).toHaveLength(9)
   })
 
   it('rejects a record signed by a key that is not a valid Ed25519 point', () => {
@@ -260,7 +262,7 @@ describe('epochRecord', () => {
     const entries = [byB, byA].map(at)
 
     const withA = resolveEpochs(entries, roster)
-    expect(withA.signed).toEqual([byA, byB])
+    expect(withA.valid).toEqual([byA, byB])
     expect(withA.accepted).toEqual([byA])
     expect(withA.latest).toBe(byA)
 

@@ -164,19 +164,21 @@ const compare = (a, b) =>
   a.seq - b.seq || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
 
 /**
- * `signed`: every record that is well-formed, signed, stored at
- * `epoch/<its id>`, the only one with its id, and chained: seq 1 with no
- * prev, or one more than the signed record its prev names. Rings are
- * opened from these.
+ * `valid`: every record that is well-formed, signed by its `by` key,
+ * stored at `epoch/<its id>`, and the only one with its id. Rings are
+ * opened from these whether they chain or not, so losing or rewriting one
+ * record never costs the keys of the others.
  *
- * `accepted`: signed records whose author is the masterTopic of a current
- * roster row. `latest` is the highest of these, so a removed device's
- * epochs, even ones it wrote while still a member, never come back.
+ * `accepted`: valid records that chain (seq 1 with no prev, or one more
+ * than the chained record its prev names) and whose author is the
+ * masterTopic of a current roster row. `latest` is the highest of these,
+ * so a removed device's epochs, even ones it wrote while still a member,
+ * never come back.
  *
  * @param {Array<{ key: string, value: unknown }>} entries
  * @param {Array<{ masterTopic?: string }>} roster
  * @param {{ verify?: (record: unknown, entry: object) => boolean }} [opts]
- * @returns {{ signed: object[], accepted: object[], latest: object | null }}
+ * @returns {{ valid: object[], accepted: object[], latest: object | null }}
  */
 export const resolveEpochs = (
   entries,
@@ -190,18 +192,20 @@ export const resolveEpochs = (
     if (!verify(record, entry)) continue
     byId.set(record.id, byId.has(record.id) ? null : record)
   }
+  const valid = [...byId.values()].filter(Boolean).sort(compare)
   // A prev always has the lower seq, so one pass in seq order settles the
   // chain, and no seq can jump ahead of the records below it.
   const chained = new Map()
-  for (const record of [...byId.values()].filter(Boolean).sort(compare)) {
+  for (const record of valid) {
     const prev = record.prev === null ? null : chained.get(record.prev)
     const linked =
       record.prev === null ? record.seq === 1 : record.seq === prev?.seq + 1
     if (linked) chained.set(record.id, record)
   }
-  const signed = [...chained.values()]
 
   const authors = new Set(rosterTopics(roster))
-  const accepted = signed.filter((record) => authors.has(record.by))
-  return { signed, accepted, latest: accepted.at(-1) ?? null }
+  const accepted = [...chained.values()].filter((record) =>
+    authors.has(record.by)
+  )
+  return { valid, accepted, latest: accepted.at(-1) ?? null }
 }
