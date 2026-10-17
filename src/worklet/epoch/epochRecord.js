@@ -1,8 +1,10 @@
 import sodium from 'sodium-native'
 
-const HEX_32 = /^[0-9a-f]{32}$/
-const HEX_64 = /^[0-9a-f]{64}$/
-const HEX_128 = /^[0-9a-f]{128}$/
+// A bare RegExp.test would stringify ['<hex>'] and accept it.
+const isHex = (value, length) =>
+  typeof value === 'string' &&
+  value.length === length &&
+  /^[0-9a-f]+$/.test(value)
 
 // v2: each member carries the topic its box is sealed to, so authorship can
 // be traced through epochs after the author left the roster.
@@ -76,24 +78,24 @@ export const buildEpochRecord = ({
 const isMember = (member) =>
   !!member &&
   typeof member === 'object' &&
-  HEX_64.test(member.topic) &&
+  isHex(member.topic, 64) &&
   typeof member.box === 'string'
 
 const isWellFormed = (record) =>
   !!record &&
   typeof record === 'object' &&
   record.v === VERSION &&
-  HEX_32.test(record.id) &&
+  isHex(record.id, 32) &&
   Number.isSafeInteger(record.seq) &&
   record.seq >= 1 &&
-  (record.prev === null || HEX_32.test(record.prev)) &&
+  (record.prev === null || isHex(record.prev, 32)) &&
   Number.isFinite(record.createdAt) &&
-  HEX_64.test(record.by) &&
+  isHex(record.by, 64) &&
   !!record.members &&
   typeof record.members === 'object' &&
   !Array.isArray(record.members) &&
   Object.values(record.members).every(isMember) &&
-  HEX_128.test(record.sig)
+  isHex(record.sig, 128)
 
 /**
  * Well-formed and signed by its `by` key. Says nothing about whether the

@@ -3,7 +3,8 @@ import sodium from 'sodium-native'
 import {
   buildEpochRecord,
   resolveEpochs,
-  verifyEpochRecord
+  verifyEpochRecord,
+  verifySignature
 } from './epochRecord.js'
 
 const keyPair = () => {
@@ -119,6 +120,53 @@ describe('epochRecord', () => {
       [second, first, other]
     ]) {
       expect(resolveEpochs(order.map(at), roster).valid).toEqual([other])
+    }
+  })
+
+  it('rejects malformed records, even when they are signed as they are', () => {
+    const id = '0a'.repeat(16)
+    const topic = hex(a)
+    // Each record is signed over its own odd shape, so only the shape check
+    // can turn it away. RegExp.test would accept ['<hex>'] as '<hex>'.
+    const signed = [
+      build({ id: [id] }),
+      build({ prev: [id] }),
+      build({ seq: '1' }),
+      build({ seq: 0 }),
+      build({ seq: 1.5 }),
+      build({ createdAt: '1' }),
+      build({ members: { A: { topic: [topic], box: 'x' } } }),
+      build({ members: { A: { topic, box: 7 } } }),
+      build({ members: { A: { topic: 'zz'.repeat(32), box: 'x' } } })
+    ]
+    const record = build({ id })
+    const edited = [
+      { ...record, v: 1 },
+      { ...record, by: [record.by] },
+      { ...record, by: 'zz'.repeat(32) },
+      { ...record, sig: [record.sig] },
+      { ...record, sig: record.sig.slice(2) },
+      { ...record, members: undefined },
+      { ...record, members: [] },
+      { ...record, members: { A: null } }
+    ]
+
+    for (const bad of [...signed, ...edited]) {
+      expect(verifySignature(bad)).toBe(false)
+      expect(verifyEpochRecord(bad, roster)).toBe(false)
+      expect(resolveEpochs([at(bad)], roster).signed).toEqual([])
+    }
+    expect(verifySignature(record)).toBe(true)
+  })
+
+  it('rejects a record signed by a key that is not a valid Ed25519 point', () => {
+    const record = build()
+    for (const by of [
+      '00'.repeat(32),
+      '01' + '00'.repeat(31),
+      'ff'.repeat(32)
+    ]) {
+      expect(verifySignature({ ...record, by })).toBe(false)
     }
   })
 
