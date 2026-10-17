@@ -176,14 +176,14 @@ const compare = (a, b) =>
  * prev, or one more than the signed record its prev names. Rings are
  * opened from these.
  *
- * `valid`: signed records whose author is trusted. Roster members are
- * trusted, and so is every member listed in a trusted record, to a fixpoint.
- * `latest` is the highest of these, so an epoch outlives its author's row.
+ * `accepted`: signed records whose author is the masterTopic of a current
+ * roster row. `latest` is the highest of these, so a removed device's
+ * epochs, even ones it wrote while still a member, never come back.
  *
  * @param {Array<{ key: string, value: unknown }>} entries
  * @param {Array<{ masterTopic?: string }>} roster
  * @param {{ verify?: (record: unknown) => boolean }} [opts]
- * @returns {{ signed: object[], valid: object[], latest: object | null }}
+ * @returns {{ signed: object[], accepted: object[], latest: object | null }}
  */
 export const resolveEpochs = (
   entries,
@@ -207,23 +207,7 @@ export const resolveEpochs = (
   }
   const signed = [...chained.values()]
 
-  const trusted = new Set(rosterTopics(roster))
-  const accepted = new Set()
-  let grew = true
-  while (grew) {
-    grew = false
-    for (const record of signed) {
-      if (accepted.has(record) || !trusted.has(record.by)) continue
-      accepted.add(record)
-      grew = true
-      for (const { topic } of Object.values(record.members)) trusted.add(topic)
-    }
-  }
-
-  const valid = signed.filter((record) => accepted.has(record))
-  return {
-    signed,
-    valid,
-    latest: valid.at(-1) ?? null
-  }
+  const authors = new Set(rosterTopics(roster))
+  const accepted = signed.filter((record) => authors.has(record.by))
+  return { signed, accepted, latest: accepted.at(-1) ?? null }
 }

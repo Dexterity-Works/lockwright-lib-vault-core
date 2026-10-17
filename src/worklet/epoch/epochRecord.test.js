@@ -84,12 +84,12 @@ describe('epochRecord', () => {
     })
     const broken = { ...build({ id: '0d'.repeat(16) }), seq: 10 }
 
-    const { valid, latest } = resolveEpochs(
+    const { accepted, latest } = resolveEpochs(
       [twoHigh, forged, one, broken, twoLow, null, 'junk'].map(at),
       roster
     )
 
-    expect(valid.map((r) => r.id)).toEqual([one.id, twoLow.id, twoHigh.id])
+    expect(accepted.map((r) => r.id)).toEqual([one.id, twoLow.id, twoHigh.id])
     expect(latest).toBe(twoHigh)
     expect(resolveEpochs([], roster).latest).toBeNull()
   })
@@ -107,11 +107,11 @@ describe('epochRecord', () => {
     const real = build({ id: '0a'.repeat(16) })
     const shadow = build({ id: real.id, createdAt: real.createdAt + 1 })
 
-    const { valid } = resolveEpochs(
+    const { accepted } = resolveEpochs(
       [at(real), { key: `epoch/${'0f'.repeat(16)}`, value: shadow }],
       roster
     )
-    expect(valid).toEqual([real])
+    expect(accepted).toEqual([real])
   })
 
   it('drops every record of an id that appears twice, in either order', () => {
@@ -124,7 +124,7 @@ describe('epochRecord', () => {
       [first, second, other],
       [second, first, other]
     ]) {
-      expect(resolveEpochs(order.map(at), roster).valid).toEqual([other])
+      expect(resolveEpochs(order.map(at), roster).accepted).toEqual([other])
     }
   })
 
@@ -214,40 +214,24 @@ describe('epochRecord', () => {
     }
   })
 
-  it('accepts authors through the members of accepted epochs', () => {
-    const c = keyPair()
-    const byA = build({
-      id: '01'.repeat(16),
-      members: {
-        A: { topic: hex(a), box: 'x' },
-        C: { topic: hex(c), box: 'x' }
-      }
-    })
-    const byC = build({
+  it('accepts only records whose author has a roster row', () => {
+    // B is a member of A's epoch, which no longer makes B an author.
+    const byA = build({ id: '01'.repeat(16) })
+    const byB = build({
       id: '02'.repeat(16),
       seq: 2,
       prev: byA.id,
-      members: { B: { topic: hex(b), box: 'x' } },
-      personalKeyPair: c
+      personalKeyPair: b
     })
-    const byOutsider = build({
-      id: '03'.repeat(16),
-      seq: 3,
-      prev: byC.id,
-      personalKeyPair: outsider
-    })
-    const entries = [byOutsider, byC, byA].map(at)
-
-    const onlyB = resolveEpochs(entries, [{ id: 'B', masterTopic: hex(b) }])
-    expect(onlyB.latest).toBeNull()
-    expect(onlyB.signed.map((r) => r.id)).toEqual([
-      byA.id,
-      byC.id,
-      byOutsider.id
-    ])
+    const entries = [byB, byA].map(at)
 
     const withA = resolveEpochs(entries, roster)
-    expect(withA.valid.map((r) => r.id)).toEqual([byA.id, byC.id])
-    expect(withA.latest).toBe(byC)
+    expect(withA.signed).toEqual([byA, byB])
+    expect(withA.accepted).toEqual([byA])
+    expect(withA.latest).toBe(byA)
+
+    const onlyB = resolveEpochs(entries, [{ id: 'B', masterTopic: hex(b) }])
+    expect(onlyB.accepted).toEqual([byB])
+    expect(resolveEpochs(entries, []).latest).toBeNull()
   })
 })

@@ -381,6 +381,60 @@ describe('epochStore over real Autopass', () => {
     expect(await value(A, 'record/y')).toBe('w')
   })
 
+  it.each([
+    ['before', 'itself'],
+    ['before', 'the rest'],
+    ['after', 'itself'],
+    ['after', 'the rest']
+  ])(
+    'never writes under an epoch a kicked device signed %s its kick, sealed to %s',
+    async (when, sealedTo) => {
+      const [A, B, C] = await setup()
+      const start = await A.store.ensureEpoch({ start: true })
+      await sync(A, B, C)
+      const plant = (prev) => {
+        const id = 'ee'.repeat(16)
+        return epochBy(C.keyPair, {
+          id,
+          seq: prev.seq + 1,
+          prev: prev.id,
+          ring: { [id]: generateEpochKey() },
+          to:
+            sealedTo === 'itself'
+              ? [['C', C.keyPair]]
+              : [
+                  ['A', A.keyPair],
+                  ['B', B.keyPair]
+                ]
+        })
+      }
+
+      if (when === 'before') {
+        const planted = plant(start)
+        await C.instance.add(`epoch/${planted.id}`, JSON.stringify(planted))
+        await sync(A, B, C)
+      }
+      const kicked = await kick(A, C)
+      if (when === 'after') {
+        // C signed it before it saw its removal; it lands behind the kick.
+        const planted = plant(kicked)
+        await A.instance.add(`epoch/${planted.id}`, JSON.stringify(planted))
+      }
+      await sync(A, B)
+
+      expect(kicked).toMatchObject({ rotated: true, members: ['A', 'B'] })
+      for (const peer of [A, B]) {
+        expect(await peer.store.ensureEpoch({ start: false })).toMatchObject({
+          rotated: false,
+          reason: 'current'
+        })
+        expect((await peer.store.status()).epoch).toBe(kicked.id)
+      }
+      await B.store.add('record/after', 'v')
+      expect((await rawEnvelope(B, 'record/after')).e).toBe(kicked.id)
+    }
+  )
+
   it('does not let a planted top seq outlive a kick', async () => {
     const [A, B, C] = await setup()
     const start = await A.store.ensureEpoch({ start: true })

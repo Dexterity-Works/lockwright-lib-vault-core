@@ -65,7 +65,7 @@ export const createEpochStore = ({
   logger = noopLogger
 }) => {
   let roster = []
-  let epochs = { signed: [], valid: [], latest: null }
+  let epochs = { signed: [], accepted: [], latest: null }
   // epochId -> key b64, only keys that open their record's check.
   let ring = Object.create(null)
   // epochId -> every key b64 an opened box offered for it.
@@ -396,7 +396,8 @@ export const createEpochStore = ({
     if (!signed.length) {
       return start ? rotateNow() : skip('legacy')
     }
-    // No trusted latest while signed epochs exist: a rotation is owed.
+    // No epoch by a roster member while signed epochs exist: a rotation is
+    // owed.
     if (!latest) return rotateNow()
     // A device that cannot open the latest ring would seal a ring without
     // the history; leave the rotation to a member that holds it.
