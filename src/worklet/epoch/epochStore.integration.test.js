@@ -863,4 +863,19 @@ describe('epochStore over real Autopass', () => {
     expect(await C.store.get('record/after')).toBeNull()
     expect(await D.store.get('record/after')).toBeNull()
   })
+
+  it('keeps vault-ext plaintext once an epoch exists', async () => {
+    const [A, B, C] = await setup()
+    await kick(A, C)
+    await A.store.add('vault-ext', '{"migratedToSchema":2}')
+    await A.store.add('vault-extra', 'x')
+    await sync(A, B, C)
+
+    expect((await A.instance.get('vault-ext')).value).toBe(
+      '{"migratedToSchema":2}'
+    )
+    // A device without the key still sees the migration state.
+    expect(await value(C, 'vault-ext')).toBe('{"migratedToSchema":2}')
+    expect((await rawEnvelope(A, 'vault-extra')).$enc).toBe(1)
+  })
 })

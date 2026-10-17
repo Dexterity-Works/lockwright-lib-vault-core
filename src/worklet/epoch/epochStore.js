@@ -21,9 +21,15 @@ const RECORDS = '@autopass/records'
 const START_OWED = 'lockwright/epoch-start-owed'
 const noopLogger = { warn: () => {} }
 
-/** Keys that stay plaintext once the vault has an epoch. */
+/**
+ * Keys that stay plaintext once the vault has an epoch. `vault-ext` is
+ * migration metadata, and a device that cannot read records must still see it.
+ */
 export const isPlaintextKey = (key) =>
-  key === 'vault' || key.startsWith('device/') || key.startsWith('epoch/')
+  key === 'vault' ||
+  key === 'vault-ext' ||
+  key.startsWith('device/') ||
+  key.startsWith('epoch/')
 
 // HyperDB range over one key prefix: '0' is the character after '/'.
 const prefixRange = (prefix) => ({
