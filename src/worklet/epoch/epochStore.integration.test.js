@@ -744,4 +744,31 @@ describe('epochStore over real Autopass', () => {
     // One to catch up on entry, one retry for the unreadable rows.
     expect(refreshes).toBeLessThanOrEqual(2)
   })
+
+  it('keeps a failed start owed across a store restart', async () => {
+    const [A] = await setup(['A'])
+    Object.defineProperty(A.instance.base, 'writable', {
+      value: false,
+      configurable: true
+    })
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      rotated: false,
+      reason: 'not-writable'
+    })
+
+    delete A.instance.base.writable
+    const restart = () =>
+      createEpochStore({
+        instance: A.instance,
+        getPersonalKeyPair: async () => A.keyPair
+      })
+    expect(await restart().ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      seq: 1
+    })
+    expect(await restart().ensureEpoch({ start: false })).toMatchObject({
+      rotated: false,
+      reason: 'current'
+    })
+  })
 })

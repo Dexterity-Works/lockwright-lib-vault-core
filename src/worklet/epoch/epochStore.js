@@ -17,6 +17,8 @@ import {
 } from './keyring.js'
 
 const RECORDS = '@autopass/records'
+// Local core userData, so an owed start survives a restart.
+const START_OWED = 'lockwright/epoch-start-owed'
 const noopLogger = { warn: () => {} }
 
 /** Keys that stay plaintext once the vault has an epoch. */
@@ -67,7 +69,8 @@ export const createEpochStore = ({
   let queued = null
   // A start that could not run (kick while not writable, say) stays owed:
   // the roster rows are gone, so nothing else would start the epoch.
-  let startOwed = false
+  // Null until read from the local core.
+  let startOwed = null
 
   instance.on('update', () => {
     updates++
@@ -353,26 +356,54 @@ export const createEpochStore = ({
     return rotate(sealable, uncovered, keyPair)
   }
 
-  const runEnsure = (start) => {
-    const owed = start || startOwed
-    const run = doEnsureEpoch({ start: owed })
-      .then(
-        (result) => {
-          const settled =
-            result.rotated ||
-            result.reason === 'current' ||
-            result.reason === 'pending'
-          startOwed = settled ? false : owed
-          return result
-        },
-        (error) => {
-          if (owed) startOwed = true
-          throw error
-        }
-      )
-      .finally(() => {
-        if (ensuring === run) ensuring = null
+  const readStartOwed = async () => {
+    if (startOwed !== null) return startOwed
+    try {
+      const stored = await instance.base.local.getUserData(START_OWED)
+      startOwed = stored?.toString() === '1'
+      return startOwed
+    } catch (error) {
+      logger.warn('epochStore: could not read the owed start', {
+        error: error?.name
       })
+      return false
+    }
+  }
+
+  const writeStartOwed = async (owed) => {
+    if (owed === startOwed) return
+    startOwed = owed
+    try {
+      await instance.base.local.setUserData(
+        START_OWED,
+        Buffer.from(owed ? '1' : '0')
+      )
+    } catch (error) {
+      logger.warn('epochStore: could not persist the owed start', {
+        error: error?.name
+      })
+    }
+  }
+
+  const runEnsure = (start) => {
+    const run = (async () => {
+      const owed = start || (await readStartOwed())
+      let result
+      try {
+        result = await doEnsureEpoch({ start: owed })
+      } catch (error) {
+        if (owed) await writeStartOwed(true)
+        throw error
+      }
+      const settled =
+        result.rotated ||
+        result.reason === 'current' ||
+        result.reason === 'pending'
+      await writeStartOwed(settled ? false : owed)
+      return result
+    })().finally(() => {
+      if (ensuring === run) ensuring = null
+    })
     ensuring = run
     return run
   }

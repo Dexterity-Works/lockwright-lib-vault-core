@@ -118,7 +118,14 @@ jest.mock('autopass', () => {
         })
       },
       local: {
-        keyPair: mockMakeKeyPairFromSeed(Buffer.alloc(32, 0x11))
+        keyPair: mockMakeKeyPairFromSeed(Buffer.alloc(32, 0x11)),
+        userData: new Map(),
+        async getUserData(key) {
+          return this.userData.get(key) ?? null
+        },
+        async setUserData(key, value) {
+          this.userData.set(key, value)
+        }
       }
     },
     store: {
