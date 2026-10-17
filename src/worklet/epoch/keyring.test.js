@@ -1,6 +1,7 @@
 import sodium from 'sodium-native'
 
 import {
+  canSealTo,
   EpochDecryptError,
   EpochKeyUnavailableError,
   decryptValue,
@@ -95,5 +96,22 @@ describe('keyring', () => {
     for (const bad of tampered) {
       expect(() => decryptValue(bad, ring, file)).toThrow(EpochDecryptError)
     }
+  })
+
+  it('skips members whose masterTopic is not a usable Ed25519 key', () => {
+    const lowOrder = '01' + '00'.repeat(31)
+    const zeros = '00'.repeat(32)
+    const sealed = sealRing(ring, [
+      { id: 'L', masterTopic: lowOrder },
+      member('A', a),
+      { id: 'Z', masterTopic: zeros }
+    ])
+
+    expect(Object.keys(sealed)).toEqual(['A'])
+    expect(openRing(sealed.A, a)).toEqual(ring)
+    expect(canSealTo(lowOrder)).toBe(false)
+    expect(canSealTo(zeros)).toBe(false)
+    expect(canSealTo(5)).toBe(false)
+    expect(canSealTo(a.publicKey.toString('hex'))).toBe(true)
   })
 })

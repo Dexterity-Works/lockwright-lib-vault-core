@@ -4,6 +4,7 @@ import {
   resolveEpochs
 } from './epochRecord.js'
 import {
+  canSealTo,
   EpochKeyUnavailableError,
   decryptValue,
   encryptValue,
@@ -14,7 +15,6 @@ import {
 } from './keyring.js'
 
 const RECORDS = '@autopass/records'
-const MASTER_TOPIC = /^[0-9a-f]{64}$/i
 const noopLogger = { warn: () => {} }
 
 /** Keys that stay plaintext once the vault has an epoch. */
@@ -205,10 +205,7 @@ export const createEpochStore = ({
     const sealedWriters = new Set()
     const rest = []
     for (const row of roster) {
-      if (
-        typeof row.masterTopic === 'string' &&
-        MASTER_TOPIC.test(row.masterTopic)
-      ) {
+      if (canSealTo(row.masterTopic)) {
         if (!sealable.has(row.id)) {
           sealable.set(row.id, { id: row.id, masterTopic: row.masterTopic })
         }

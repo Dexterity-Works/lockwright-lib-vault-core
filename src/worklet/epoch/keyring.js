@@ -41,21 +41,45 @@ export const generateEpochKey = () => {
   }
 }
 
+const MASTER_TOPIC = /^[0-9a-f]{64}$/i
+
+// Null when masterTopic is not an Ed25519 key that converts to Curve25519
+// (low-order points, all zeros, wrong shape).
+const toCurvePublicKey = (masterTopic) => {
+  if (typeof masterTopic !== 'string' || !MASTER_TOPIC.test(masterTopic)) {
+    return null
+  }
+  const curvePk = Buffer.alloc(sodium.crypto_box_PUBLICKEYBYTES)
+  try {
+    sodium.crypto_sign_ed25519_pk_to_curve25519(
+      curvePk,
+      Buffer.from(masterTopic, 'hex')
+    )
+    return curvePk
+  } catch {
+    return null
+  }
+}
+
 /**
+ * @param {unknown} masterTopic
+ * @returns {boolean} whether a ring can be sealed to this device key
+ */
+export const canSealTo = (masterTopic) => toCurvePublicKey(masterTopic) !== null
+
+/**
+ * Members whose key cannot be sealed to are left out of the result.
  * @param {Record<string, string>} ring epochId -> key b64
  * @param {Array<{ id: string, masterTopic: string }>} members
  * @returns {Record<string, string>} deviceId -> sealed box b64
  */
 export const sealRing = (ring, members) => {
   const message = secureFrom(JSON.stringify(ring), 'utf8')
-  const curvePk = Buffer.alloc(sodium.crypto_box_PUBLICKEYBYTES)
   try {
     const sealed = {}
     for (const { id, masterTopic } of members) {
-      sodium.crypto_sign_ed25519_pk_to_curve25519(
-        curvePk,
-        Buffer.from(masterTopic, 'hex')
-      )
+      const curvePk = toCurvePublicKey(masterTopic)
+      if (!curvePk) continue
       const box = Buffer.alloc(message.length + sodium.crypto_box_SEALBYTES)
       sodium.crypto_box_seal(box, message, curvePk)
       sealed[id] = box.toString('base64')

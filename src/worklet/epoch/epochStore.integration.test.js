@@ -475,4 +475,20 @@ describe('epochStore over real Autopass', () => {
     expect(await value(L2, 'record/back')).toBe('v')
     expect((await L2.store.status()).canRead).toBe(true)
   })
+
+  it('rotates past rows whose masterTopic is not a usable key', async () => {
+    const [A] = await setup(['A'])
+    await addDevice(A, { id: 'Y', masterTopic: '00'.repeat(32) })
+    await addDevice(A, { id: 'Z', masterTopic: '01' + '00'.repeat(31) })
+
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      rotated: true,
+      members: ['A'],
+      uncovered: ['Y', 'Z']
+    })
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: false,
+      reason: 'current'
+    })
+  })
 })
