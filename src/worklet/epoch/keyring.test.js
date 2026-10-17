@@ -136,6 +136,20 @@ describe('keyring', () => {
     )
   })
 
+  it('refuses a key whose unused base64 bits are set', () => {
+    // 43 characters carry 258 bits; the last 2 are padding. Setting them
+    // spells the same 32 bytes another way.
+    const chars =
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    const last = chars.indexOf(ring.e1[42])
+    const alias = `${ring.e1.slice(0, 42)}${chars[last ^ 1]}=`
+    expect(Buffer.from(alias, 'base64')).toEqual(Buffer.from(ring.e1, 'base64'))
+
+    expect(() => encryptValue('e1', alias, 'v')).toThrow(EpochDecryptError)
+    const sealed = sealRing({ e1: ring.e1, e9: alias }, [member('A', a)])
+    expect(openRing(sealed.A, a)).toEqual({ e1: ring.e1 })
+  })
+
   it('drops ring entries that are not valid epoch keys when opening', () => {
     const sealed = sealRing(
       { e1: ring.e1, bad: '!'.repeat(43) + '=', short: 'AAAA' },

@@ -48,12 +48,22 @@ const secureFrom = (string, encoding) => {
   return buffer
 }
 
-// 32 bytes in canonical base64. Buffer.byteLength only counts characters,
-// so a key like '!'.repeat(43) + '=' would pass a length check and decode
-// to sodium_malloc's fill: a fixed, guessable key.
-const EPOCH_KEY = /^[A-Za-z0-9+/]{43}=$/
-
-const isEpochKey = (key) => typeof key === 'string' && EPOCH_KEY.test(key)
+// 32 bytes in canonical base64: decoding and encoding again gives the same
+// string. Buffer.byteLength only counts characters, so '!'.repeat(43) + '='
+// would pass a length check and decode to sodium_malloc's fill, and a set
+// padding bit would spell one key several ways.
+const isEpochKey = (key) => {
+  if (typeof key !== 'string') return false
+  const bytes = Buffer.from(key, 'base64')
+  try {
+    return (
+      bytes.length === sodium.crypto_secretbox_KEYBYTES &&
+      bytes.toString('base64') === key
+    )
+  } finally {
+    bytes.fill(0)
+  }
+}
 
 /**
  * @returns {string} 32-byte secretbox key, base64
