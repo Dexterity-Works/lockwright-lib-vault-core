@@ -167,7 +167,10 @@ const seal = (bytes, key) => {
 }
 
 const open = (ciphertext, nonceB64, key) => {
-  const nonce = Buffer.from(nonceB64 || '', 'base64')
+  if (typeof nonceB64 !== 'string' || !Buffer.isBuffer(ciphertext)) {
+    throw new EpochDecryptError()
+  }
+  const nonce = Buffer.from(nonceB64, 'base64')
   if (
     nonce.length !== sodium.crypto_secretbox_NONCEBYTES ||
     ciphertext.length < sodium.crypto_secretbox_MACBYTES
@@ -240,10 +243,19 @@ export const decryptValue = (envelope, ring, fileBuffer) => {
       throw new EpochDecryptError('Envelope is not JSON')
     }
   }
-  if (!isEnvelope(parsed) || typeof parsed.c !== 'string') {
+  if (
+    !isEnvelope(parsed) ||
+    typeof parsed.c !== 'string' ||
+    typeof parsed.n !== 'string' ||
+    typeof parsed.e !== 'string' ||
+    (parsed.fn !== undefined && typeof parsed.fn !== 'string')
+  ) {
     throw new EpochDecryptError('Not an epoch envelope')
   }
-  const keyB64 = ring[parsed.e]
+  if (!ring || typeof ring !== 'object') {
+    throw new EpochDecryptError('No epoch keyring')
+  }
+  const keyB64 = Object.hasOwn(ring, parsed.e) ? ring[parsed.e] : undefined
   if (typeof keyB64 !== 'string') throw new EpochKeyUnavailableError(parsed.e)
   if (!parsed.fn !== !fileBuffer) {
     throw new EpochDecryptError('Envelope and attached file disagree')

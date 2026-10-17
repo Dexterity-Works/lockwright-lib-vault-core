@@ -134,4 +134,37 @@ describe('keyring', () => {
 
     expect(openRing(sealed.A, a)).toEqual({ e1: ring.e1 })
   })
+
+  it('throws EpochDecryptError, never a TypeError, on malformed envelopes', () => {
+    const withFile = encryptValue('e1', ring.e1, 'v', Buffer.from('f'))
+    const plain = encryptValue('e1', ring.e1, 'v').envelope
+    const flippedFile = Buffer.from(withFile.file)
+    flippedFile[0] ^= 1
+    const cases = [
+      [editEnvelope(plain, { n: 123 }), ring, null],
+      [editEnvelope(withFile.envelope, { fn: {} }), ring, withFile.file],
+      [editEnvelope(plain, { e: 7 }), ring, null],
+      [editEnvelope(plain, { e: null }), ring, null],
+      [plain, null, null],
+      [editEnvelope(plain, { n: 'AAAA' }), ring, null],
+      [
+        editEnvelope(plain, { c: Buffer.alloc(10).toString('base64') }),
+        ring,
+        null
+      ],
+      [
+        editEnvelope(plain, { fn: JSON.parse(withFile.envelope).fn }),
+        ring,
+        null
+      ],
+      [plain, ring, withFile.file],
+      [withFile.envelope, ring, flippedFile]
+    ]
+
+    for (const [envelope, keys, file] of cases) {
+      expect(() => decryptValue(envelope, keys, file)).toThrow(
+        EpochDecryptError
+      )
+    }
+  })
 })
