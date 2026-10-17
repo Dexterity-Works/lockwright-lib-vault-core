@@ -8,7 +8,12 @@ import sodium from 'sodium-native'
 
 import { buildEpochRecord } from './epochRecord.js'
 import { createEpochStore } from './epochStore.js'
-import { EpochRecordWriteError, generateEpochKey, sealRing } from './keyring.js'
+import {
+  EpochKeyUnavailableError,
+  EpochRecordWriteError,
+  generateEpochKey,
+  sealRing
+} from './keyring.js'
 
 jest.setTimeout(60000)
 
@@ -302,10 +307,12 @@ describe('epochStore over real Autopass', () => {
       await A.store.find({ gte: { key: 'record/' }, lt: { key: 'record0' } })
     ).toEqual([])
     expect(C.instance.writable).toBe(false)
-    await expect(C.store.add('record/later', '{}')).rejects.toThrow()
+    await expect(C.store.add('record/later', '{}')).rejects.toThrow(
+      EpochKeyUnavailableError
+    )
   })
 
-  it('ignores replayed, forged, and broken epoch records', async () => {
+  it('ignores misplaced, forged, and broken epoch records', async () => {
     const [A, B, C] = await setup()
     const first = await kick(A, C)
     const firstRecord = (await A.instance.get(`epoch/${first.id}`)).value
@@ -313,7 +320,6 @@ describe('epochStore over real Autopass', () => {
     const second = await A.store.ensureEpoch({ start: false })
     expect(second.seq).toBe(2)
 
-    await A.instance.add(`epoch/${first.id}`, firstRecord)
     await A.instance.add('epoch/replayed-copy', firstRecord)
     const forged = buildEpochRecord({
       seq: 99,
@@ -770,5 +776,91 @@ describe('epochStore over real Autopass', () => {
       rotated: false,
       reason: 'current'
     })
+  })
+
+  it('does not move latest back when an older epoch is appended again', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    // The older epoch sorts last by key and is appended last, so only seq
+    // can tell the two apart.
+    const older = 'ff'.repeat(16)
+    const newer = '00'.repeat(16)
+    const keys = { [older]: generateEpochKey(), [newer]: generateEpochKey() }
+    const to = [
+      ['A', A.keyPair],
+      ['B', B.keyPair]
+    ]
+    const olderRecord = JSON.stringify(
+      epochBy(A.keyPair, {
+        id: older,
+        seq: 1,
+        ring: { [older]: keys[older] },
+        to
+      })
+    )
+    const newerRecord = epochBy(A.keyPair, {
+      id: newer,
+      seq: 2,
+      prev: older,
+      ring: keys,
+      to
+    })
+    await A.instance.add(`epoch/${older}`, olderRecord)
+    await A.instance.add(`epoch/${newer}`, JSON.stringify(newerRecord))
+    await A.instance.remove(`epoch/${older}`)
+    await A.instance.add(`epoch/${older}`, olderRecord)
+    await sync(A, B)
+
+    for (const peer of [A, B]) {
+      expect(await peer.store.status()).toMatchObject({
+        epoch: newer,
+        seq: 2
+      })
+    }
+    await B.store.add('record/r', 'v')
+    expect((await rawEnvelope(B, 'record/r')).e).toBe(newer)
+
+    await addDevice(A, rowFor('D', makeKeyPair()))
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      seq: 3
+    })
+  })
+
+  it('settles two rotations made at once by different members', async () => {
+    const [A, B, C, D] = await setup(['A', 'B', 'C', 'D'])
+    await A.store.ensureEpoch({ start: true })
+    await sync(A, B, C, D)
+
+    // A drops C and B drops D before either sees the other's rotation.
+    await A.store.remove('device/C')
+    await B.store.remove('device/D')
+    const [fromA, fromB] = await Promise.all([
+      A.store.ensureEpoch({ start: true }),
+      B.store.ensureEpoch({ start: true })
+    ])
+    expect(fromA).toMatchObject({ rotated: true, seq: 2 })
+    expect(fromB).toMatchObject({ rotated: true, seq: 2 })
+    expect(fromA.members).toEqual(['A', 'B', 'D'])
+    expect(fromB.members).toEqual(['A', 'B', 'C'])
+    await sync(A, B)
+
+    // Either seq-2 epoch still lists a removed device, so the next run
+    // rotates past both; the other member then finds it current.
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      seq: 3,
+      members: ['A', 'B']
+    })
+    await sync(A, B)
+    expect(await B.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: false,
+      reason: 'current'
+    })
+
+    await B.store.add('record/after', 'v')
+    await sync(A, B, C, D)
+    expect(await value(A, 'record/after')).toBe('v')
+    expect(await C.store.get('record/after')).toBeNull()
+    expect(await D.store.get('record/after')).toBeNull()
   })
 })
