@@ -845,6 +845,28 @@ describe('epochStore over real Autopass', () => {
     expect((await store.status()).canRead).toBe(true)
   })
 
+  it('reads from a fresh store while another refresh fails', async () => {
+    const [A] = await setup(['A'])
+    await A.store.ensureEpoch({ start: true })
+    await A.store.add('record/r', 'v')
+    let fail = false
+    const store = createEpochStore({
+      instance: A.instance,
+      getPersonalKeyPair: async () => {
+        if (!fail) return A.keyPair
+        fail = false
+        throw new Error('key store busy')
+      }
+    })
+    expect((await store.get('record/r')).value).toBe('v')
+
+    fail = true
+    const failing = store.refresh()
+    const read = store.get('record/r')
+    await expect(failing).rejects.toThrow('key store busy')
+    expect((await read).value).toBe('v')
+  })
+
   it('reports revoked only when every clause of the rule holds', async () => {
     expect(await revokedFor()).toBe(true)
     // No accepted epoch: its only author left the roster.

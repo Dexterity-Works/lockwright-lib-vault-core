@@ -205,7 +205,10 @@ export const createEpochStore = ({
     return refreshing
   }
 
-  const ensureFresh = () => (refreshedAt === updates ? refreshing : refresh())
+  // Already fresh: another caller's refresh failing does not make this
+  // read fail.
+  const ensureFresh = () =>
+    refreshedAt === updates ? refreshing.catch(() => {}) : refresh()
 
   // Throws EpochKeyUnavailableError / EpochDecryptError for unreadable values.
   // `pass` is shared by every row of one get or find call, so the call
