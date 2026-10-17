@@ -8,6 +8,7 @@ import sodium from 'sodium-native'
 
 import { buildEpochRecord } from './epochRecord.js'
 import { createEpochStore } from './epochStore.js'
+import { EpochRecordWriteError } from './keyring.js'
 
 jest.setTimeout(60000)
 
@@ -566,5 +567,23 @@ describe('epochStore over real Autopass', () => {
       canRead: true
     })
     expect(await value(B, 'record/c')).toBe('from C')
+  })
+
+  it('refuses add and remove on epoch keys', async () => {
+    const [A] = await setup(['A'])
+    const { id } = await A.store.ensureEpoch({ start: true })
+
+    await expect(A.store.add(`epoch/${id}`, '{}')).rejects.toThrow(
+      EpochRecordWriteError
+    )
+    await expect(A.store.add('epoch/new', '{}')).rejects.toThrow(
+      EpochRecordWriteError
+    )
+    await expect(A.store.remove(`epoch/${id}`)).rejects.toThrow(
+      EpochRecordWriteError
+    )
+    expect(await A.instance.get(`epoch/${id}`)).not.toBeNull()
+    expect(await A.instance.get('epoch/new')).toBeNull()
+    expect((await A.store.status()).epoch).toBe(id)
   })
 })

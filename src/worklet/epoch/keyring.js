@@ -16,6 +16,15 @@ export class EpochRotationPendingError extends Error {
   }
 }
 
+/** Epoch records are appended by a rotation only, never by add or remove. */
+export class EpochRecordWriteError extends Error {
+  constructor(key) {
+    super(`Only an epoch rotation may write ${key}`)
+    this.name = 'EpochRecordWriteError'
+    this.key = key
+  }
+}
+
 export class EpochDecryptError extends Error {
   constructor(message = 'Epoch envelope failed to decrypt') {
     super(message)

@@ -6,6 +6,7 @@ import {
 import {
   canSealTo,
   EpochKeyUnavailableError,
+  EpochRecordWriteError,
   EpochRotationPendingError,
   decryptValue,
   encryptValue,
@@ -27,6 +28,12 @@ const prefixRange = (prefix) => ({
   gte: { key: prefix },
   lt: { key: `${prefix.slice(0, -1)}0` }
 })
+
+const refuseEpochKey = (key) => {
+  if (typeof key === 'string' && key.startsWith('epoch/')) {
+    throw new EpochRecordWriteError(key)
+  }
+}
 
 const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x))
 
@@ -173,6 +180,7 @@ export const createEpochStore = ({
   }
 
   const add = async (key, value, file) => {
+    refuseEpochKey(key)
     // Always re-resolve before a write: a stale epoch would leak the value
     // to a device that was just removed.
     await refresh()
@@ -218,7 +226,10 @@ export const createEpochStore = ({
     return results
   }
 
-  const remove = (key) => instance.remove(key)
+  const remove = async (key) => {
+    refuseEpochKey(key)
+    return instance.remove(key)
+  }
 
   const coverage = () => {
     const sealable = new Map()
