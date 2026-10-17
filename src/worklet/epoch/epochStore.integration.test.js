@@ -55,15 +55,18 @@ const makePeer = async (id, host) => {
   return peer
 }
 
-const heads = (peer) =>
-  JSON.stringify(
-    peer.instance.base
+// Heads alone can match while a peer is still linearizing what it fetched,
+// so the applied length is part of the state.
+const applied = (peer) =>
+  JSON.stringify({
+    heads: peer.instance.base
       .heads()
       .map((h) => `${h.key.toString('hex')}:${h.length}`)
-      .sort()
-  )
+      .sort(),
+    length: peer.instance.base.length
+  })
 
-// Replicates every pair over in-memory streams until all heads agree.
+// Replicates every pair over in-memory streams until all peers applied the same state.
 const sync = async (...group) => {
   const streams = []
   for (let i = 0; i < group.length; i++) {
@@ -77,7 +80,7 @@ const sync = async (...group) => {
   try {
     for (let round = 0; round < 100; round++) {
       await Promise.all(group.map((p) => p.instance.base.update()))
-      if (new Set(group.map(heads)).size === 1 && round > 0) return
+      if (new Set(group.map(applied)).size === 1 && round > 0) return
       await new Promise((resolve) => setTimeout(resolve, 20))
     }
     throw new Error('sync: peers did not converge')
