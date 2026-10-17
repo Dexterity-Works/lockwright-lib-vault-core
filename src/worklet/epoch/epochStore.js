@@ -57,6 +57,9 @@ export const createEpochStore = ({
   let ensuring = null
   /** @type {{ start: boolean, promise: Promise<object> } | null} */
   let queued = null
+  // A start that could not run (kick while not writable, say) stays owed:
+  // the roster rows are gone, so nothing else would start the epoch.
+  let startOwed = false
 
   instance.on('update', () => {
     updates++
@@ -276,9 +279,25 @@ export const createEpochStore = ({
   }
 
   const runEnsure = (start) => {
-    const run = doEnsureEpoch({ start }).finally(() => {
-      if (ensuring === run) ensuring = null
-    })
+    const owed = start || startOwed
+    const run = doEnsureEpoch({ start: owed })
+      .then(
+        (result) => {
+          const settled =
+            result.rotated ||
+            result.reason === 'current' ||
+            result.reason === 'pending'
+          startOwed = settled ? false : owed
+          return result
+        },
+        (error) => {
+          if (owed) startOwed = true
+          throw error
+        }
+      )
+      .finally(() => {
+        if (ensuring === run) ensuring = null
+      })
     ensuring = run
     return run
   }

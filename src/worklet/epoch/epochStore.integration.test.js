@@ -418,4 +418,31 @@ describe('epochStore over real Autopass', () => {
       })
     }
   })
+
+  it('owes a failed start and runs it on a later start:false', async () => {
+    const [A] = await setup(['A'])
+    Object.defineProperty(A.instance.base, 'writable', {
+      value: false,
+      configurable: true
+    })
+
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      rotated: false,
+      reason: 'not-writable'
+    })
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: false,
+      reason: 'not-writable'
+    })
+
+    delete A.instance.base.writable
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      seq: 1
+    })
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: false,
+      reason: 'current'
+    })
+  })
 })
