@@ -103,10 +103,7 @@ export const createEpochStore = ({
     const keyPair = await getPersonalKeyPair()
     const nextRoster = await readRoster()
     const records = await readPrefix('epoch/')
-    const next = resolveEpochs(
-      records.map(({ value }) => value),
-      nextRoster
-    )
+    const next = resolveEpochs(records, nextRoster)
 
     for (const { key, value } of records) {
       if (!next.valid.includes(value)) {

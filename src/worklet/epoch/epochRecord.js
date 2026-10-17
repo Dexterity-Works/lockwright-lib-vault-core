@@ -112,17 +112,20 @@ const compare = (a, b) =>
   a.seq - b.seq || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
 
 /**
- * @param {Array<unknown>} records
+ * The signature does not cover the storage key, so a record only counts at
+ * `epoch/<its id>`, and an id claimed twice is dropped entirely.
+ *
+ * @param {Array<{ key: string, value: unknown }>} entries
  * @param {Array<{ masterTopic?: string }>} roster
  * @returns {{ valid: object[], latest: object | null }}
  */
-export const resolveEpochs = (records, roster) => {
+export const resolveEpochs = (entries, roster) => {
   const byId = new Map()
-  for (const record of records) {
-    if (!byId.has(record?.id) && verifyEpochRecord(record, roster)) {
-      byId.set(record.id, record)
-    }
+  for (const { key, value: record } of entries) {
+    if (key !== `epoch/${record?.id}`) continue
+    if (!verifyEpochRecord(record, roster)) continue
+    byId.set(record.id, byId.has(record.id) ? null : record)
   }
-  const valid = [...byId.values()].sort(compare)
+  const valid = [...byId.values()].filter(Boolean).sort(compare)
   return { valid, latest: valid.at(-1) ?? null }
 }

@@ -13,6 +13,8 @@ const keyPair = () => {
   return { publicKey, secretKey }
 }
 
+const at = (record) => ({ key: `epoch/${record?.id}`, value: record })
+
 describe('epochRecord', () => {
   const a = keyPair()
   const outsider = keyPair()
@@ -71,7 +73,7 @@ describe('epochRecord', () => {
     const broken = { ...build({ id: '0d'.repeat(16) }), seq: 10 }
 
     const { valid, latest } = resolveEpochs(
-      [twoHigh, forged, one, broken, twoLow, null, 'junk'],
+      [twoHigh, forged, one, broken, twoLow, null, 'junk'].map(at),
       roster
     )
 
@@ -86,6 +88,31 @@ describe('epochRecord', () => {
 
     expect(verifyEpochRecord(record, odd)).toBe(true)
     expect(verifyEpochRecord(record, null)).toBe(false)
-    expect(resolveEpochs([record], odd).latest).toBe(record)
+    expect(resolveEpochs([at(record)], odd).latest).toBe(record)
+  })
+
+  it('ignores a record stored under another epoch key', () => {
+    const real = build({ id: '0a'.repeat(16) })
+    const shadow = build({ id: real.id, seq: 5 })
+
+    const { valid } = resolveEpochs(
+      [at(real), { key: `epoch/${'0f'.repeat(16)}`, value: shadow }],
+      roster
+    )
+    expect(valid).toEqual([real])
+  })
+
+  it('drops every record of an id that appears twice, in either order', () => {
+    const id = '0a'.repeat(16)
+    const first = build({ id })
+    const second = build({ id, seq: 2 })
+    const other = build({ id: '0b'.repeat(16) })
+
+    for (const order of [
+      [first, second, other],
+      [second, first, other]
+    ]) {
+      expect(resolveEpochs(order.map(at), roster).valid).toEqual([other])
+    }
   })
 })
