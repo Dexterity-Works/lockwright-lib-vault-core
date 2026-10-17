@@ -22,11 +22,21 @@ const free = (...buffers) => {
   }
 }
 
+// Best effort only: ring keys also live as base64 JS strings (the same
+// accepted exposure as the string key in encryptVaultWithKey), so zeroing
+// these sodium_malloc buffers cannot clear every copy.
 const secureFrom = (string, encoding) => {
   const buffer = sodium.sodium_malloc(Buffer.byteLength(string, encoding))
   buffer.write(string, encoding)
   return buffer
 }
+
+// 32 bytes in canonical base64. Buffer.byteLength only counts characters,
+// so a key like '!'.repeat(43) + '=' would pass a length check and decode
+// to sodium_malloc's fill: a fixed, guessable key.
+const EPOCH_KEY = /^[A-Za-z0-9+/]{43}=$/
+
+const isEpochKey = (key) => typeof key === 'string' && EPOCH_KEY.test(key)
 
 /**
  * @returns {string} 32-byte secretbox key, base64
@@ -114,10 +124,13 @@ export const openRing = (sealedB64, personalKeyPair) => {
     )
     if (!sodium.crypto_box_seal_open(plain, box, curvePk, curveSk)) return null
 
-    const ring = JSON.parse(plain.toString('utf8'))
-    if (!ring || typeof ring !== 'object' || Array.isArray(ring)) return null
-    for (const key of Object.values(ring)) {
-      if (typeof key !== 'string') return null
+    const parsed = JSON.parse(plain.toString('utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return null
+    }
+    const ring = {}
+    for (const [epochId, key] of Object.entries(parsed)) {
+      if (isEpochKey(key)) ring[epochId] = key
     }
     return ring
   } catch {
@@ -172,12 +185,15 @@ const open = (ciphertext, nonceB64, key) => {
 }
 
 const readKey = (keyB64) => {
-  if (
-    Buffer.byteLength(keyB64, 'base64') !== sodium.crypto_secretbox_KEYBYTES
-  ) {
-    throw new EpochDecryptError('Epoch key has the wrong length')
+  if (!isEpochKey(keyB64)) {
+    throw new EpochDecryptError('Epoch key is not 32 bytes of base64')
   }
-  return secureFrom(keyB64, 'base64')
+  const key = sodium.sodium_malloc(sodium.crypto_secretbox_KEYBYTES)
+  if (key.write(keyB64, 'base64') !== sodium.crypto_secretbox_KEYBYTES) {
+    free(key)
+    throw new EpochDecryptError('Epoch key is not 32 bytes of base64')
+  }
+  return key
 }
 
 /**

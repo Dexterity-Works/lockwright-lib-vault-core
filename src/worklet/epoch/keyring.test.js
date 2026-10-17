@@ -114,4 +114,24 @@ describe('keyring', () => {
     expect(canSealTo(5)).toBe(false)
     expect(canSealTo(a.publicKey.toString('hex'))).toBe(true)
   })
+
+  it('refuses epoch keys that are not exactly 32 bytes of base64', () => {
+    const fake = '!'.repeat(43) + '='
+    const good = encryptValue('e1', ring.e1, 'v').envelope
+
+    expect(() => encryptValue('e1', fake, 'v')).toThrow(EpochDecryptError)
+    expect(() => decryptValue(good, { e1: fake })).toThrow(EpochDecryptError)
+    expect(() => encryptValue('e1', ring.e1.slice(0, -1), 'v')).toThrow(
+      EpochDecryptError
+    )
+  })
+
+  it('drops ring entries that are not valid epoch keys when opening', () => {
+    const sealed = sealRing(
+      { e1: ring.e1, bad: '!'.repeat(43) + '=', short: 'AAAA' },
+      [member('A', a)]
+    )
+
+    expect(openRing(sealed.A, a)).toEqual({ e1: ring.e1 })
+  })
 })
