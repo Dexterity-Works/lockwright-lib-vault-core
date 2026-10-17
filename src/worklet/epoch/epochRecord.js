@@ -8,12 +8,15 @@ const isHex = (value, length) =>
 
 const VERSION = 1
 
-const sortMembers = (members) =>
-  Object.fromEntries(
-    Object.keys(members)
-      .sort()
-      .map((id) => [id, { topic: members[id].topic, box: members[id].box }])
-  )
+// UTF-8 byte order is code-point order.
+const byCodePoint = (a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b))
+
+// An array, because JSON.stringify writes integer-like object keys first
+// and in numeric order, whatever order they were added in.
+const memberPairs = (members) =>
+  Object.keys(members)
+    .sort(byCodePoint)
+    .map((id) => [id, { topic: members[id].topic, box: members[id].box }])
 
 const canonicalBytes = ({ v, id, seq, prev, createdAt, by, members, check }) =>
   Buffer.from(
@@ -24,7 +27,7 @@ const canonicalBytes = ({ v, id, seq, prev, createdAt, by, members, check }) =>
       prev,
       createdAt,
       by,
-      members: sortMembers(members),
+      members: memberPairs(members),
       check: { n: check.n, c: check.c }
     })
   )
@@ -65,7 +68,7 @@ export const buildEpochRecord = ({
     prev,
     createdAt,
     by: personalKeyPair.publicKey.toString('hex'),
-    members: sortMembers(members),
+    members: Object.fromEntries(memberPairs(members)),
     check: { n: check.n, c: check.c }
   }
   const sig = Buffer.alloc(sodium.crypto_sign_BYTES)

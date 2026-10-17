@@ -46,6 +46,42 @@ describe('epochRecord', () => {
     expect(resolveEpochs([at(record)], roster).latest).toBe(record)
   })
 
+  it('signs members as pairs in code-point order, integer-like ids too', () => {
+    const topic = hex(b)
+    const record = build({
+      members: {
+        9: { topic, box: 'x' },
+        10: { topic, box: 'y' },
+        B: { topic, box: 'z' }
+      }
+    })
+    const { v, id, seq, prev, createdAt, by, check: c } = record
+    // JSON.stringify of an object would put 9 before 10.
+    const canonical = JSON.stringify({
+      v,
+      id,
+      seq,
+      prev,
+      createdAt,
+      by,
+      members: [
+        ['10', { topic, box: 'y' }],
+        ['9', { topic, box: 'x' }],
+        ['B', { topic, box: 'z' }]
+      ],
+      check: c
+    })
+
+    expect(
+      sodium.crypto_sign_verify_detached(
+        Buffer.from(record.sig, 'hex'),
+        Buffer.from(canonical),
+        a.publicKey
+      )
+    ).toBe(true)
+    expect(verifySignature(record)).toBe(true)
+  })
+
   it('fails when any canonical field changes', () => {
     const record = build()
     const edits = [
