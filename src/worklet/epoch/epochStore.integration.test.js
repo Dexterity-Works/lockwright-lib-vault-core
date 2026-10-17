@@ -11,6 +11,7 @@ import { createEpochStore } from './epochStore.js'
 import {
   EpochKeyUnavailableError,
   EpochRecordWriteError,
+  EpochRotationPendingError,
   generateEpochKey,
   sealCheck,
   sealRing
@@ -960,6 +961,64 @@ describe('epochStore over real Autopass', () => {
       rotated: true,
       seq: 1
     })
+  })
+
+  it('keeps a start owed when the run throws', async () => {
+    const [A] = await setup(['A'])
+    let fail = true
+    const failing = createEpochStore({
+      instance: A.instance,
+      getPersonalKeyPair: async () => {
+        if (!fail) return A.keyPair
+        fail = false
+        throw new Error('key store busy')
+      }
+    })
+    await expect(failing.ensureEpoch({ start: true })).rejects.toThrow(
+      'key store busy'
+    )
+
+    const restarted = createEpochStore({
+      instance: A.instance,
+      getPersonalKeyPair: async () => A.keyPair
+    })
+    expect(await restarted.ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      seq: 1
+    })
+  })
+
+  it('refuses a write it cannot rotate for while the epoch lists a removed device', async () => {
+    const [A, B, C] = await setup()
+    await A.store.ensureEpoch({ start: true })
+    await sync(A, B, C)
+    await A.store.remove('device/C')
+    await sync(A, B)
+    Object.defineProperty(B.instance.base, 'writable', {
+      value: false,
+      configurable: true
+    })
+
+    await expect(B.store.add('record/s', 'secret')).rejects.toThrow(
+      EpochRotationPendingError
+    )
+    expect(await B.instance.get('record/s')).toBeNull()
+  })
+
+  it('reports each row find cannot read to onUnreadable', async () => {
+    const [A] = await setup(['A'])
+    await A.store.ensureEpoch({ start: true })
+    await A.store.add('record/1', 'v1')
+    await A.instance.add('record/2', UNREADABLE)
+    const unreadable = []
+
+    const found = await A.store.find({
+      gte: { key: 'record/' },
+      lt: { key: 'record0' },
+      onUnreadable: (key) => unreadable.push(key)
+    })
+    expect(found.map((r) => r.key)).toEqual(['record/1'])
+    expect(unreadable).toEqual(['record/2'])
   })
 
   it('does not move latest back when an older epoch is appended again', async () => {
