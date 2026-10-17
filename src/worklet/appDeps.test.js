@@ -1240,6 +1240,26 @@ describe('appDeps module functions (excluding encryption)', () => {
       expect(appDeps.getVaultMigrationStatus().ready).toBe(false)
     })
 
+    test('vaultRemove drops the v2 files of a record, readable or not', async () => {
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      await appDeps.activeVaultAdd('record/r1', {
+        id: 'r1',
+        type: 'note',
+        data: { title: 'x' }
+      })
+      await appDeps.activeVaultAdd(
+        'record-v2/r1/file/f1',
+        { name: 'a.txt' },
+        Buffer.from('a')
+      )
+      vault.put('record-v2/r1/file/f2', unreadable)
+      await appDeps.vaultRemove('record/r1')
+
+      expect(
+        [...vault.rows.keys()].filter((key) => key.startsWith('record-v2/'))
+      ).toEqual([])
+    })
+
     test('opens a vault whose migration waits on an epoch rotation', async () => {
       vault.put('device/other', deviceRow('other', makeSignKeyPair()))
       await appDeps.activeVaultEnsureEpoch({ start: true })

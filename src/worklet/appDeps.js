@@ -560,17 +560,25 @@ export const setEpochStatusListener = (listener) => {
 }
 
 /**
- * Remove v2 file keys for a record id.
+ * Remove v2 file keys for a record id, including rows this device cannot
+ * read: leaving those would orphan their sealed files.
  * @param {string} recordId
  * @returns {Promise<void>}
  */
 const removeV2FilesForRecord = async (recordId) => {
-  const entries = await collectActiveVaultEntries((key) => {
-    const parsed = parseFileKey(key)
-    return parsed?.schema === 2 && parsed.recordId === recordId
+  const prefix = `${recordKeyV2(recordId)}/file/`
+  const keys = []
+  const readable = await epochStore.find({
+    gte: { key: prefix },
+    lt: { key: `${prefix.slice(0, -1)}0` },
+    onUnreadable: (key) => keys.push(key)
   })
-  for (const { key } of entries) {
-    await epochStore.remove(key)
+  for (const { key } of readable) keys.push(key)
+  for (const key of keys) {
+    const parsed = parseFileKey(key)
+    if (parsed?.schema === 2 && parsed.recordId === recordId) {
+      await epochStore.remove(key)
+    }
   }
 }
 
