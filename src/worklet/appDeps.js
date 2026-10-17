@@ -303,13 +303,14 @@ export const collectValuesByFilter = async (instance, filterFn) => {
 
 /**
  * Active vault entries with parsed values, decrypted by the epoch store.
- * Records the store cannot read are left out.
+ * Records the store cannot read are left out and passed to onUnreadable.
  * @param {Function} [filterFn]
+ * @param {(key: string) => void} [onUnreadable]
  * @returns {Promise<Array<{ key: string, value: any }>>}
  */
-const collectActiveVaultEntries = async (filterFn) => {
+const collectActiveVaultEntries = async (filterFn, onUnreadable) => {
   const results = []
-  for (const { key, value } of await epochStore.find()) {
+  for (const { key, value } of await epochStore.find({ onUnreadable })) {
     if (!value || (filterFn && !filterFn(key))) continue
 
     let parsedValue
@@ -414,10 +415,21 @@ const runIncrementalReconcile = async () => {
   if (!isActiveVaultInitialized || !activeVaultInstance) return
 
   const vaultExt = (await activeVaultGetRaw(VAULT_EXT_KEY)) || {}
-  const adapter = createActiveVaultAdapter()
+  const { canRead } = await epochStore.status()
+  let unreadable = false
+  const entries = await collectActiveVaultEntries(undefined, () => {
+    unreadable = true
+  })
+  const adapter = {
+    ...createActiveVaultAdapter(),
+    listEntries: async () => entries
+  }
   const result = await reconcileDualStore(adapter, {
     previousV1Ids: previousV1RecordIds,
-    blockV1DeleteMirror: vaultExt.blockV1DeleteMirror === true
+    // A v1 record this device cannot read looks deleted; mirroring that
+    // would delete a v2 record it never saw change.
+    blockV1DeleteMirror:
+      vaultExt.blockV1DeleteMirror === true || !canRead || unreadable
   })
   previousV1RecordIds = result.previousV1Ids
 }

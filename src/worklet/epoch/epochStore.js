@@ -235,7 +235,20 @@ export const createEpochStore = ({
     return record && readOrNull(key, record)
   }
 
-  const find = async ({ gte, lte, gt, lt, limit, reverse } = {}) => {
+  /**
+   * Rows this device cannot read are left out and reported to onUnreadable.
+   * @param {{ gte?, lte?, gt?, lt?, limit?: number, reverse?: boolean,
+   *   onUnreadable?: (key: string) => void }} [opts]
+   */
+  const find = async ({
+    gte,
+    lte,
+    gt,
+    lt,
+    limit,
+    reverse,
+    onUnreadable
+  } = {}) => {
     await ensureFresh()
     const results = []
     // Unreadable rows do not count toward the limit, so read the view
@@ -252,6 +265,7 @@ export const createEpochStore = ({
       if (results.length >= max) break
       const decoded = await readOrNull(record.key, record, pass)
       if (decoded) results.push({ key: record.key, ...decoded })
+      else onUnreadable?.(record.key)
     }
     return results
   }
