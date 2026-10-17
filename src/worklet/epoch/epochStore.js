@@ -65,7 +65,7 @@ export const createEpochStore = ({
   logger = noopLogger
 }) => {
   let roster = []
-  let epochs = { signed: [], valid: [], latest: null, highSeq: 0 }
+  let epochs = { signed: [], valid: [], latest: null }
   // epochId -> key b64, only keys that open their record's check.
   let ring = Object.create(null)
   // epochId -> every key b64 an opened box offered for it.
@@ -335,8 +335,13 @@ export const createEpochStore = ({
     typeof masterTopic === 'string' &&
     masterTopic.toLowerCase() === keyPair.publicKey.toString('hex')
 
+  // Null when the appended record did not resolve as the latest epoch.
   const rotate = async (sealable, uncovered, keyPair) => {
-    const { latest, highSeq } = epochs
+    const { latest } = epochs
+    const seq = latest ? latest.seq + 1 : 1
+    if (!Number.isSafeInteger(seq)) {
+      throw new Error(`Epoch seq ${seq} is not a safe integer`)
+    }
     const id = generateEpochId()
     const key = generateEpochKey()
     const boxes = sealRing({ ...ring, [id]: key }, sealable)
@@ -349,10 +354,9 @@ export const createEpochStore = ({
         }
       }
     }
-    // Seq comes from every signed record, so latest never moves backwards.
     const record = buildEpochRecord({
       id,
-      seq: highSeq + 1,
+      seq,
       prev: latest ? latest.id : null,
       members,
       check: sealCheck(key),
@@ -361,6 +365,7 @@ export const createEpochStore = ({
     offer(id, key)
     await instance.add(`epoch/${id}`, JSON.stringify(record))
     await refresh()
+    if (epochs.latest?.id !== id) return null
     return {
       rotated: true,
       id,
@@ -370,11 +375,18 @@ export const createEpochStore = ({
     }
   }
 
-  const doEnsureEpoch = async ({ start = false } = {}) => {
+  const doEnsureEpoch = async ({ start = false } = {}, retried = false) => {
     await refresh()
     const keyPair = await getPersonalKeyPair()
     const { sealable, uncovered } = coverage()
     const skip = (reason) => ({ rotated: false, reason, uncovered })
+    const rotateNow = async () => {
+      const result = await rotate(sealable, uncovered, keyPair)
+      if (result) return result
+      // Another epoch resolved above the one just appended: judge that one.
+      if (retried) throw new Error('Epoch rotation did not resolve as latest')
+      return doEnsureEpoch({ start }, true)
+    }
 
     if (!instance.base.writable) return skip('not-writable')
     if (!sealable.some((row) => isMe(row.masterTopic, keyPair))) {
@@ -382,17 +394,17 @@ export const createEpochStore = ({
     }
     const { latest, signed } = epochs
     if (!signed.length) {
-      return start ? rotate(sealable, uncovered, keyPair) : skip('legacy')
+      return start ? rotateNow() : skip('legacy')
     }
     // No trusted latest while signed epochs exist: a rotation is owed.
-    if (!latest) return rotate(sealable, uncovered, keyPair)
+    if (!latest) return rotateNow()
     // A device that cannot open the latest ring would seal a ring without
     // the history; leave the rotation to a member that holds it.
     if (!ring[latest.id]) return skip('pending')
     if (sameSet(memberPairs(latest), sealablePairs(sealable))) {
       return skip('current')
     }
-    return rotate(sealable, uncovered, keyPair)
+    return rotateNow()
   }
 
   const readStartOwed = async () => {

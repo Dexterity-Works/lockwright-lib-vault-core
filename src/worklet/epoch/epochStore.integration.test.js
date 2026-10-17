@@ -381,6 +381,69 @@ describe('epochStore over real Autopass', () => {
     expect(await value(A, 'record/y')).toBe('w')
   })
 
+  it('does not let a planted top seq outlive a kick', async () => {
+    const [A, B, C] = await setup()
+    const start = await A.store.ensureEpoch({ start: true })
+    await sync(A, B, C)
+    // C plants an epoch at the top of the safe range before it is kicked.
+    const id = '0f'.repeat(16)
+    const planted = epochBy(C.keyPair, {
+      id,
+      seq: Number.MAX_SAFE_INTEGER,
+      ring: { [id]: generateEpochKey() },
+      to: [
+        ['A', A.keyPair],
+        ['B', B.keyPair],
+        ['C', C.keyPair]
+      ]
+    })
+    await C.instance.add(`epoch/${id}`, JSON.stringify(planted))
+    await sync(A, B, C)
+
+    const kicked = await kick(A, C)
+    expect(kicked).toMatchObject({ rotated: true, seq: start.seq + 1 })
+    await sync(A, B)
+    expect(await B.store.status()).toMatchObject({
+      epoch: kicked.id,
+      seq: start.seq + 1
+    })
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      reason: 'current'
+    })
+    await B.store.add('record/after', 'v')
+    expect((await rawEnvelope(B, 'record/after')).e).toBe(kicked.id)
+  })
+
+  it('reports no rotation when another epoch resolves above the new one', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    const add = A.instance.add.bind(A.instance)
+    let rival = null
+    // B's epoch with the same seq and a higher id lands right behind A's.
+    A.instance.add = async (key, record, file) => {
+      await add(key, record, file)
+      if (rival || !key.startsWith('epoch/')) return
+      const { seq, prev } = JSON.parse(record)
+      const id = 'ff'.repeat(16)
+      rival = epochBy(B.keyPair, {
+        id,
+        seq,
+        prev,
+        ring: { [id]: generateEpochKey() },
+        to: [
+          ['A', A.keyPair],
+          ['B', B.keyPair]
+        ]
+      })
+      await add(`epoch/${id}`, JSON.stringify(rival))
+    }
+
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      rotated: false,
+      reason: 'current'
+    })
+    expect((await A.store.status()).epoch).toBe(rival.id)
+  })
+
   it('omits an envelope whose epoch id was edited', async () => {
     const [A, , C] = await setup()
     const first = await kick(A, C)
@@ -662,10 +725,11 @@ describe('epochStore over real Autopass', () => {
     expect(await value(B, 'record/c')).toBe('from C')
     expect(await value(A, 'record/b')).toBe('from B')
     expect(await C.store.get('record/b')).toBeNull()
+    // No epoch has an author in the roster, so B starts the chain again.
     expect(await B.store.status()).toMatchObject({
       legacy: false,
       canRead: true,
-      seq: 2
+      seq: 1
     })
   })
 
@@ -676,12 +740,12 @@ describe('epochStore over real Autopass', () => {
     await sync(A, B, C)
 
     const result = await kick(A, C)
-    expect(result).toMatchObject({ rotated: true, seq: 2 })
+    expect(result).toMatchObject({ rotated: true, seq: 1 })
     await sync(A, B)
 
     expect(await B.store.status()).toMatchObject({
       epoch: result.id,
-      seq: 2,
+      seq: 1,
       canRead: true
     })
     expect(await value(B, 'record/c')).toBe('from C')

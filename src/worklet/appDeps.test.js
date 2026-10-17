@@ -1102,8 +1102,9 @@ describe('appDeps module functions (excluding encryption)', () => {
       }
     }
 
-    // A rostered device `other` writes epoch `seq` sealed to itself only.
-    const putForeignEpoch = (seq = 1) => {
+    // A rostered device `other` writes epoch `seq` after `prev`, sealed to
+    // itself only.
+    const putForeignEpoch = (seq = 1, prev = null) => {
       const other = makeSignKeyPair()
       const topic = other.publicKey.toString('hex')
       vault.put('device/other', deviceRow('other', other))
@@ -1115,7 +1116,7 @@ describe('appDeps module functions (excluding encryption)', () => {
       const record = buildEpochRecord({
         id,
         seq,
-        prev: null,
+        prev,
         members: { other: { topic, box } },
         check: sealCheck(key),
         personalKeyPair: other
@@ -1379,7 +1380,8 @@ describe('appDeps module functions (excluding encryption)', () => {
 
       test('deletes nothing while the latest epoch is unreadable here', async () => {
         const fireUpdate = await seenRecord()
-        putForeignEpoch(2)
+        const { epoch } = await appDeps.activeVaultGetEpochStatus()
+        putForeignEpoch(2, epoch)
         vault.rows.delete('record/r1')
         await fireUpdate()
 

@@ -172,8 +172,9 @@ const compare = (a, b) =>
 
 /**
  * `signed`: every record that is well-formed, signed, stored at
- * `epoch/<its id>`, and the only one with its id. Rings are opened from
- * these, and `highSeq` is their highest seq.
+ * `epoch/<its id>`, the only one with its id, and chained: seq 1 with no
+ * prev, or one more than the signed record its prev names. Rings are
+ * opened from these.
  *
  * `valid`: signed records whose author is trusted. Roster members are
  * trusted, and so is every member listed in a trusted record, to a fixpoint.
@@ -182,7 +183,7 @@ const compare = (a, b) =>
  * @param {Array<{ key: string, value: unknown }>} entries
  * @param {Array<{ masterTopic?: string }>} roster
  * @param {{ verify?: (record: unknown) => boolean }} [opts]
- * @returns {{ signed: object[], valid: object[], latest: object | null, highSeq: number }}
+ * @returns {{ signed: object[], valid: object[], latest: object | null }}
  */
 export const resolveEpochs = (
   entries,
@@ -195,7 +196,16 @@ export const resolveEpochs = (
     if (!verify(record)) continue
     byId.set(record.id, byId.has(record.id) ? null : record)
   }
-  const signed = [...byId.values()].filter(Boolean).sort(compare)
+  // A prev always has the lower seq, so one pass in seq order settles the
+  // chain, and no seq can jump ahead of the records below it.
+  const chained = new Map()
+  for (const record of [...byId.values()].filter(Boolean).sort(compare)) {
+    const prev = record.prev === null ? null : chained.get(record.prev)
+    const linked =
+      record.prev === null ? record.seq === 1 : record.seq === prev?.seq + 1
+    if (linked) chained.set(record.id, record)
+  }
+  const signed = [...chained.values()]
 
   const trusted = new Set(rosterTopics(roster))
   const accepted = new Set()
@@ -214,7 +224,6 @@ export const resolveEpochs = (
   return {
     signed,
     valid,
-    latest: valid.at(-1) ?? null,
-    highSeq: signed.at(-1)?.seq ?? 0
+    latest: valid.at(-1) ?? null
   }
 }

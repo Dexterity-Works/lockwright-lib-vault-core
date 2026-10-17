@@ -74,11 +74,12 @@ describe('epochRecord', () => {
 
   it('resolves the highest seq with an id tie-break and drops invalid records', () => {
     const one = build({ id: '01'.repeat(16) })
-    const twoLow = build({ id: '0a'.repeat(16), seq: 2 })
-    const twoHigh = build({ id: '0b'.repeat(16), seq: 2 })
+    const twoLow = build({ id: '0a'.repeat(16), seq: 2, prev: one.id })
+    const twoHigh = build({ id: '0b'.repeat(16), seq: 2, prev: one.id })
     const forged = build({
       id: '0c'.repeat(16),
-      seq: 9,
+      seq: 3,
+      prev: twoHigh.id,
       personalKeyPair: outsider
     })
     const broken = { ...build({ id: '0d'.repeat(16) }), seq: 10 }
@@ -104,7 +105,7 @@ describe('epochRecord', () => {
 
   it('ignores a record stored under another epoch key', () => {
     const real = build({ id: '0a'.repeat(16) })
-    const shadow = build({ id: real.id, seq: 5 })
+    const shadow = build({ id: real.id, createdAt: real.createdAt + 1 })
 
     const { valid } = resolveEpochs(
       [at(real), { key: `epoch/${'0f'.repeat(16)}`, value: shadow }],
@@ -116,7 +117,7 @@ describe('epochRecord', () => {
   it('drops every record of an id that appears twice, in either order', () => {
     const id = '0a'.repeat(16)
     const first = build({ id })
-    const second = build({ id, seq: 2 })
+    const second = build({ id, createdAt: first.createdAt + 1 })
     const other = build({ id: '0b'.repeat(16) })
 
     for (const order of [
@@ -180,6 +181,28 @@ describe('epochRecord', () => {
     }
   })
 
+  it('keeps only records that chain to a signed record one seq below', () => {
+    const one = build({ id: '01'.repeat(16) })
+    const two = build({ id: '02'.repeat(16), seq: 2, prev: one.id })
+    const three = build({ id: '03'.repeat(16), seq: 3, prev: two.id })
+    const unchained = [
+      build({ id: '0a'.repeat(16), seq: 2 }),
+      build({ id: '0b'.repeat(16), seq: 3, prev: one.id }),
+      build({ id: '0c'.repeat(16), seq: 1, prev: one.id }),
+      build({ id: '0d'.repeat(16), seq: 2, prev: 'ee'.repeat(16) }),
+      build({ id: '0e'.repeat(16), seq: Number.MAX_SAFE_INTEGER }),
+      // Chains to a record that does not chain.
+      build({ id: '0f'.repeat(16), seq: 3, prev: '0d'.repeat(16) })
+    ]
+
+    const { signed, latest } = resolveEpochs(
+      [three, ...unchained, two, one].map(at),
+      roster
+    )
+    expect(signed.map((r) => r.id)).toEqual([one.id, two.id, three.id])
+    expect(latest).toBe(three)
+  })
+
   it('rejects a record signed by a key that is not a valid Ed25519 point', () => {
     const record = build()
     for (const by of [
@@ -203,12 +226,14 @@ describe('epochRecord', () => {
     const byC = build({
       id: '02'.repeat(16),
       seq: 2,
+      prev: byA.id,
       members: { B: { topic: hex(b), box: 'x' } },
       personalKeyPair: c
     })
     const byOutsider = build({
       id: '03'.repeat(16),
-      seq: 9,
+      seq: 3,
+      prev: byC.id,
       personalKeyPair: outsider
     })
     const entries = [byOutsider, byC, byA].map(at)
@@ -220,7 +245,6 @@ describe('epochRecord', () => {
       byC.id,
       byOutsider.id
     ])
-    expect(onlyB.highSeq).toBe(9)
 
     const withA = resolveEpochs(entries, roster)
     expect(withA.valid.map((r) => r.id)).toEqual([byA.id, byC.id])
