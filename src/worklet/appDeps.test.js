@@ -103,6 +103,7 @@ jest.mock('autopass', () => {
       }
     }),
     removeAllListeners: jest.fn(),
+    removeListener: jest.fn(),
     on: jest.fn(),
     pairInstance: jest.fn().mockResolvedValue(),
     core: {
@@ -260,8 +261,58 @@ global.Bare = {
 import bareFs from 'bare-fs'
 
 import * as appDeps from './appDeps'
+import { buildEpochRecord } from './epoch/epochRecord'
+import { generateEpochKey, sealRing } from './epoch/keyring'
 
 const mockSodium = require('sodium-native')
+
+// In-memory records behind the mocked active vault: add/get/remove and a
+// HyperDB-style range find, so the real epoch store runs over it.
+const useMemoryVault = (instance) => {
+  const rows = new Map()
+  const inRange = (key, { gte, gt, lte, lt } = {}) =>
+    (!gte || key >= gte.key) &&
+    (!gt || key > gt.key) &&
+    (!lte || key <= lte.key) &&
+    (!lt || key < lt.key)
+  instance.add = jest.fn(async (key, value, file) => {
+    rows.set(key, { key, value, file: file ?? null })
+  })
+  instance.get = jest.fn(async (key) => {
+    const row = rows.get(key)
+    return row ? { value: row.value, file: row.file } : null
+  })
+  instance.remove = jest.fn(async (key) => {
+    rows.delete(key)
+  })
+  instance.base.view.find = jest.fn((_, range) => ({
+    async *[Symbol.asyncIterator]() {
+      for (const key of [...rows.keys()].sort()) {
+        if (inRange(key, range)) yield rows.get(key)
+      }
+    }
+  }))
+  instance.base.writable = true
+  const put = (key, value) => rows.set(key, { key, value, file: null })
+  return { rows, put }
+}
+
+const makeSignKeyPair = () => {
+  const publicKey = Buffer.alloc(mockSodium.crypto_sign_PUBLICKEYBYTES)
+  const secretKey = Buffer.alloc(mockSodium.crypto_sign_SECRETKEYBYTES)
+  mockSodium.crypto_sign_keypair(publicKey, secretKey)
+  return { publicKey, secretKey }
+}
+
+const deviceRow = (id, keyPair) =>
+  JSON.stringify({ id, masterTopic: keyPair.publicKey.toString('hex') })
+
+const waitFor = async (check) => {
+  for (let i = 0; i < 200 && !check(); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  expect(check()).toBe(true)
+}
 
 describe('appDeps module functions (excluding encryption)', () => {
   beforeEach(async () => {
@@ -590,6 +641,10 @@ describe('appDeps module functions (excluding encryption)', () => {
         id: 'vault1',
         encryptionKey: 'key'
       })
+      const { put } = useMemoryVault(appDeps.getActiveVaultInstance())
+      put('test1', '1')
+      put('filter_test', '2')
+      put('test2', '3')
       const result = await appDeps.activeVaultList('test')
       expect(result).toEqual([1, 3])
     })
@@ -998,6 +1053,145 @@ describe('appDeps module functions (excluding encryption)', () => {
       expect(enriched.otpPublic.type).toBe('TOTP')
       expect(enriched.otpPublic).not.toHaveProperty('currentCode')
       expect(enriched.otpPublic).not.toHaveProperty('timeRemaining')
+    })
+  })
+  describe('Active vault epoch store', () => {
+    let me
+    let vault
+
+    beforeEach(async () => {
+      await appDeps.setStoragePath('/home/testuser/vaultdata')
+      await appDeps.masterVaultInit({
+        encryptionKey: 'key',
+        hashedPassword: 'pw'
+      })
+      await appDeps.initActiveVaultInstance({
+        id: 'vault1',
+        encryptionKey: 'key'
+      })
+      me = await appDeps.getPersonalKeyPair()
+      vault = useMemoryVault(appDeps.getActiveVaultInstance())
+      vault.put('device/me', deviceRow('me', me))
+    })
+
+    afterEach(async () => {
+      appDeps.setEpochStatusListener(null)
+      await appDeps.closeAllInstances()
+    })
+
+    test('activeVaultAdd writes plaintext before an epoch and an envelope after', async () => {
+      await appDeps.activeVaultAdd('note/1', { title: 'before' })
+      expect(JSON.parse(vault.rows.get('note/1').value)).toEqual({
+        title: 'before'
+      })
+
+      const result = await appDeps.activeVaultEnsureEpoch({ start: true })
+      expect(result).toMatchObject({ rotated: true, members: ['me'] })
+
+      await appDeps.activeVaultAdd('note/2', { title: 'after' })
+      const stored = vault.rows.get('note/2').value
+      expect(JSON.parse(stored)).toMatchObject({ $enc: 1, e: result.id })
+      expect(stored).not.toContain('after')
+    })
+
+    test('get, getFile, list and find decrypt and omit unreadable records', async () => {
+      await appDeps.activeVaultAdd('note/1', { title: 'legacy' })
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      await appDeps.activeVaultAdd('note/2', { title: 'sealed' })
+      await appDeps.activeVaultAdd('file/1', {}, Buffer.from('attachment'))
+      vault.put(
+        'note/3',
+        JSON.stringify({ $enc: 1, e: 'ff'.repeat(16), n: 'AA==', c: 'AA==' })
+      )
+
+      expect(vault.rows.get('file/1').file.toString()).not.toBe('attachment')
+      expect(await appDeps.activeVaultGetFile('file/1')).toEqual(
+        Buffer.from('attachment')
+      )
+      expect(await appDeps.activeVaultGet('note/2')).toEqual({
+        title: 'sealed'
+      })
+      expect(await appDeps.activeVaultGet('note/3')).toBeNull()
+      expect(await appDeps.activeVaultList('note/')).toEqual([
+        { title: 'legacy' },
+        { title: 'sealed' }
+      ])
+      expect(
+        await appDeps.activeVaultFind({
+          gte: { key: 'note/' },
+          lt: { key: 'note0' }
+        })
+      ).toEqual([
+        { key: 'note/1', value: { title: 'legacy' } },
+        { key: 'note/2', value: { title: 'sealed' } }
+      ])
+    })
+
+    test('activeVaultAdd reports a missing epoch key in words the UI can show', async () => {
+      const other = makeSignKeyPair()
+      vault.put('device/other', deviceRow('other', other))
+      const id = 'aa'.repeat(16)
+      const record = buildEpochRecord({
+        id,
+        seq: 1,
+        prev: null,
+        members: sealRing({ [id]: generateEpochKey() }, [
+          { id: 'other', masterTopic: other.publicKey.toString('hex') }
+        ]),
+        personalKeyPair: other
+      })
+      vault.put(`epoch/${id}`, JSON.stringify(record))
+
+      await expect(
+        appDeps.activeVaultAdd('note/1', { title: 'x' })
+      ).rejects.toThrow('Vault key not available yet')
+      expect(vault.rows.has('note/1')).toBe(false)
+      expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+        epoch: id,
+        canRead: false,
+        revoked: false
+      })
+    })
+
+    test('the update listener rotates when needed and pushes status only on change', async () => {
+      const pushes = []
+      appDeps.setEpochStatusListener((status) => pushes.push(status))
+      const instance = appDeps.getActiveVaultInstance()
+      const onUpdate = jest.fn()
+      await appDeps.initListener({ vaultId: 'vault1', onUpdate })
+      const updateListener = instance.on.mock.calls
+        .filter(([event]) => event === 'update')
+        .at(-1)[1]
+      const fireUpdate = async () => {
+        const before = onUpdate.mock.calls.length
+        updateListener()
+        await waitFor(() => onUpdate.mock.calls.length > before)
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      await fireUpdate()
+      expect(pushes).toHaveLength(1)
+      expect(pushes[0]).toMatchObject({ legacy: false, members: ['me'] })
+
+      await fireUpdate()
+      expect(pushes).toHaveLength(1)
+
+      vault.put('device/other', deviceRow('other', makeSignKeyPair()))
+      await fireUpdate()
+      expect(pushes).toHaveLength(2)
+      expect(pushes[1]).toMatchObject({ seq: 2, members: ['me', 'other'] })
+    })
+  })
+
+  describe('epoch API without an active vault', () => {
+    test('activeVaultEnsureEpoch and activeVaultGetEpochStatus throw', async () => {
+      await expect(
+        appDeps.activeVaultEnsureEpoch({ start: true })
+      ).rejects.toThrow('Vault not initialised')
+      await expect(appDeps.activeVaultGetEpochStatus()).rejects.toThrow(
+        'Vault not initialised'
+      )
     })
   })
 })

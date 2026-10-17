@@ -7,6 +7,8 @@ import BlindEncryptionSodium from 'blind-encryption-sodium'
 import Corestore from 'corestore'
 import sodium from 'sodium-native'
 
+import { createEpochStore } from './epoch/epochStore'
+import { EpochKeyUnavailableError } from './epoch/keyring'
 import { getForbiddenRoots } from './getForbiddenRoots'
 import {
   generateTOTP,
@@ -70,6 +72,9 @@ let personalKeyPair = null
 
 let activeVaultInstance
 let isActiveVaultInitialized = false
+/** @type {ReturnType<typeof createEpochStore> | null} */
+let epochStore = null
+let activeVaultUpdateListener = null
 
 let listeningVaultId = null
 let lastActiveVaultId = null
@@ -92,6 +97,14 @@ let previousV1RecordIds = new Set()
 /** @type {ReturnType<typeof setTimeout>|null} */
 let reconcileDebounceTimer = null
 const RECONCILE_DEBOUNCE_MS = 100
+
+/** @type {((status: object) => void) | null} */
+let epochStatusListener = null
+let lastEpochStatusJson = null
+/** @type {Promise<void> | null} */
+let epochSync = null
+/** @type {{ ensure: boolean } | null} */
+let epochSyncNext = null
 
 const pearpassPairer = new PearPassPairer()
 const rateLimiter = new RateLimiter()
@@ -227,6 +240,9 @@ export const closeActiveVaultInstance = async (options) => {
 
   activeVaultInstance = null
   isActiveVaultInitialized = false
+  epochStore = null
+  activeVaultUpdateListener = null
+  lastEpochStatusJson = null
   // reset listener marker so future initListener can rebind
   listeningVaultId = null
   previousV1RecordIds = new Set()
@@ -283,44 +299,30 @@ export const collectValuesByFilter = async (instance, filterFn) => {
 }
 
 /**
- * @param {Autopass} instance
+ * Active vault entries with parsed values, decrypted by the epoch store.
+ * Records the store cannot read are left out.
  * @param {Function} [filterFn]
  * @returns {Promise<Array<{ key: string, value: any }>>}
  */
-export const collectEntriesByFilter = async (instance, filterFn) => {
-  const stream = await instance.list()
+const collectActiveVaultEntries = async (filterFn) => {
   const results = []
+  for (const { key, value } of await epochStore.find()) {
+    if (!value || (filterFn && !filterFn(key))) continue
 
-  return new Promise((resolve, reject) => {
-    stream.on('data', ({ key, value }) => {
-      if (!value) {
-        return
-      }
+    let parsedValue
+    try {
+      parsedValue = JSON.parse(value)
+    } catch (err) {
+      workletLogger.error('collectActiveVaultEntries: failed to parse record', {
+        key,
+        err
+      })
+      continue
+    }
 
-      let parsedValue
-      try {
-        parsedValue = JSON.parse(value)
-      } catch (err) {
-        workletLogger.error('collectEntriesByFilter: failed to parse record', {
-          key,
-          err
-        })
-        return
-      }
-
-      if (!parsedValue) {
-        return
-      }
-
-      if (!filterFn || filterFn(key)) {
-        results.push({ key, value: parsedValue })
-      }
-    })
-
-    stream.on('end', () => resolve(results))
-
-    stream.on('error', (error) => reject(error))
-  })
+    if (parsedValue) results.push({ key, value: parsedValue })
+  }
+  return results
 }
 
 /**
@@ -329,7 +331,7 @@ export const collectEntriesByFilter = async (instance, filterFn) => {
 const createActiveVaultAdapter = () => ({
   getJson: activeVaultGetRaw,
   getWithFile: async (key) => {
-    const res = await activeVaultInstance.get(key)
+    const res = await epochStore.get(key)
     if (!res) return { value: null, file: null }
     let value = null
     if (res.value) {
@@ -342,19 +344,16 @@ const createActiveVaultAdapter = () => ({
     return { value, file: res.file || null }
   },
   addJson: async (key, data, file = null) => {
-    await activeVaultInstance.add(key, JSON.stringify(data), file || undefined)
+    await epochStore.add(key, JSON.stringify(data), file || undefined)
   },
   remove: async (key) => {
-    await activeVaultInstance.remove(key)
+    await epochStore.remove(key)
   },
-  listEntries: async () => collectEntriesByFilter(activeVaultInstance)
+  listEntries: async () => collectActiveVaultEntries()
 })
 
 const refreshPreviousV1RecordIds = async () => {
-  const entries = await collectEntriesByFilter(
-    activeVaultInstance,
-    isV1RecordKey
-  )
+  const entries = await collectActiveVaultEntries(isV1RecordKey)
   previousV1RecordIds = new Set(
     entries.map(({ key }) => parseRecordIdFromKey(key)).filter(Boolean)
   )
@@ -437,18 +436,75 @@ const scheduleIncrementalReconcile = (after) => {
   }, RECONCILE_DEBOUNCE_MS)
 }
 
+const runEpochSync = async ({ ensure }) => {
+  const store = epochStore
+  if (!store) return
+  try {
+    if (ensure && activeVaultInstance?.base?.writable) {
+      await store.ensureEpoch({ start: false })
+    }
+    const status = await store.status()
+    const { epoch, seq, legacy, canRead, revoked, members, uncovered } = status
+    const json = JSON.stringify({
+      epoch,
+      seq,
+      legacy,
+      canRead,
+      revoked,
+      members,
+      uncovered
+    })
+    if (store !== epochStore || json === lastEpochStatusJson) return
+    lastEpochStatusJson = json
+    epochStatusListener?.(status)
+  } catch (error) {
+    workletLogger.error('epoch sync failed', error)
+  }
+}
+
+/**
+ * Keep the epoch current and push its status when it changed. One run at a
+ * time; a burst of updates during a run collapses into one more run.
+ * @param {{ ensure: boolean }} opts
+ * @returns {Promise<void>}
+ */
+const syncEpoch = ({ ensure }) => {
+  if (epochSync) {
+    epochSyncNext = { ensure: ensure || !!epochSyncNext?.ensure }
+    return epochSync
+  }
+  epochSync = (async () => {
+    let next = { ensure }
+    while (next) {
+      epochSyncNext = null
+      await runEpochSync(next)
+      next = epochSyncNext
+    }
+  })().finally(() => {
+    epochSync = null
+  })
+  return epochSync
+}
+
+/**
+ * @param {((status: object) => void) | null} listener
+ */
+export const setEpochStatusListener = (listener) => {
+  epochStatusListener = listener
+}
+
 /**
  * Remove v2 file keys for a record id.
  * @param {string} recordId
  * @returns {Promise<void>}
  */
 const removeV2FilesForRecord = async (recordId) => {
-  const entries = await collectEntriesByFilter(activeVaultInstance, (key) => {
+  const entries = await collectActiveVaultEntries((key) => {
     const parsed = parseFileKey(key)
     return parsed?.schema === 2 && parsed.recordId === recordId
   })
   for (const { key } of entries) {
-    await activeVaultInstance.remove(key)
+    await epochStore.remove(key)
   }
 }
 
@@ -625,6 +681,11 @@ export const initActiveVaultInstance = async ({ id, encryptionKey }) => {
       encryptionKey,
       hashedPassword
     })
+    epochStore = createEpochStore({
+      instance: activeVaultInstance,
+      getPersonalKeyPair,
+      logger: workletLogger
+    })
 
     isActiveVaultInitialized = true
 
@@ -633,7 +694,14 @@ export const initActiveVaultInstance = async ({ id, encryptionKey }) => {
     lastActiveVaultEncryptionKey = encryptionKey
 
     // First launch (no watermark): convert records + copy files once; later opens no-op.
-    await runVaultMigration()
+    try {
+      await runVaultMigration()
+    } catch (error) {
+      // A device not yet in the latest epoch cannot write; open anyway so
+      // it can show its epoch status. Migration reruns on the next open.
+      if (!(error instanceof EpochKeyUnavailableError)) throw error
+      workletLogger.warn('vault migration deferred: no epoch key yet')
+    }
 
     if (lastOnUpdateCallback) {
       lastOnUpdateCallback()
@@ -644,6 +712,8 @@ export const initActiveVaultInstance = async ({ id, encryptionKey }) => {
     void activeVaultInstance.base.update().catch((error) => {
       workletLogger.error('activeVault Autobase update failed', error)
     })
+
+    void syncEpoch({ ensure: false })
 
     return activeVaultInstance
   })()
@@ -835,9 +905,9 @@ export const activeVaultAdd = async (key, data, file, fileName) => {
     throw new Error('Vault not initialised')
   }
   try {
-    await activeVaultInstance.add(key, JSON.stringify(data), file)
+    await epochStore.add(key, JSON.stringify(data), file)
 
-    // Local dual-write / projection (companion namespace). Uses raw add to avoid recursion.
+    // Local dual-write / projection (companion namespace). Uses the store directly to avoid recursion.
     if (isV1RecordKey(key)) {
       const id = parseRecordIdFromKey(key)
       if (id) {
@@ -846,7 +916,7 @@ export const activeVaultAdd = async (key, data, file, fileName) => {
           mergeV1IntoV2(data, existingV2) ||
           (!existingV2 ? convertV1RecordToV2(data) : null)
         if (nextV2 && !deepEqualJson(nextV2, existingV2)) {
-          await activeVaultInstance.add(recordKeyV2(id), JSON.stringify(nextV2))
+          await epochStore.add(recordKeyV2(id), JSON.stringify(nextV2))
         }
       }
     } else if (isV2RecordKey(key)) {
@@ -855,23 +925,20 @@ export const activeVaultAdd = async (key, data, file, fileName) => {
         const asV2 =
           data?.schema === SCHEMA_V2 ? data : convertV1RecordToV2(data)
         if (asV2 !== data) {
-          await activeVaultInstance.add(key, JSON.stringify(asV2), file)
+          await epochStore.add(key, JSON.stringify(asV2), file)
         }
         const projected = projectV2ToV1(asV2)
         const existingV1 = await activeVaultGetRaw(recordKeyV1(id))
         if (!existingV1 || !deepEqualJson(existingV1, projected)) {
-          await activeVaultInstance.add(
-            recordKeyV1(id),
-            JSON.stringify(projected)
-          )
+          await epochStore.add(recordKeyV1(id), JSON.stringify(projected))
         }
       }
     } else if (isV1FileKey(key)) {
       const v2Key = v1FileKeyToV2(key)
       if (v2Key) {
-        const existing = await activeVaultInstance.get(v2Key)
+        const existing = await epochStore.get(v2Key)
         if (!existing?.file) {
-          await activeVaultInstance.add(
+          await epochStore.add(
             v2Key,
             JSON.stringify(data && typeof data === 'object' ? data : {}),
             file
@@ -882,9 +949,9 @@ export const activeVaultAdd = async (key, data, file, fileName) => {
       const parsed = parseFileKey(key)
       if (parsed) {
         const v1Key = fileKeyV1(parsed.recordId, parsed.fileId)
-        const existing = await activeVaultInstance.get(v1Key)
+        const existing = await epochStore.get(v1Key)
         if (!existing?.file) {
-          await activeVaultInstance.add(
+          await epochStore.add(
             v1Key,
             JSON.stringify(data && typeof data === 'object' ? data : {}),
             file
@@ -893,7 +960,11 @@ export const activeVaultAdd = async (key, data, file, fileName) => {
       }
     }
   } catch (error) {
-    const err = new Error(error.message)
+    const err = new Error(
+      error instanceof EpochKeyUnavailableError
+        ? 'Vault key not available yet: another device must rotate it'
+        : error.message
+    )
     if (fileName) {
       err.details = { fileName }
     }
@@ -1073,7 +1144,7 @@ export const activeVaultGetFile = async (key) => {
     throw new Error('Vault not initialised')
   }
 
-  const res = await activeVaultInstance.get(key)
+  const res = await epochStore.get(key)
   return res?.file || null
 }
 
@@ -1086,7 +1157,7 @@ export const activeVaultRemoveFile = async (key) => {
     throw new Error('Vault not initialised')
   }
 
-  await activeVaultInstance.remove(key)
+  await epochStore.remove(key)
 }
 
 /**
@@ -1098,7 +1169,7 @@ export const vaultRemove = async (key) => {
     throw new Error('Vault not initialised')
   }
 
-  await activeVaultInstance.remove(key)
+  await epochStore.remove(key)
 
   const vaultExt = (await activeVaultGetRaw(VAULT_EXT_KEY)) || {}
   const blockV1DeleteMirror = vaultExt.blockV1DeleteMirror === true
@@ -1107,28 +1178,26 @@ export const vaultRemove = async (key) => {
     if (!blockV1DeleteMirror) {
       const id = parseRecordIdFromKey(key)
       if (id) {
-        await activeVaultInstance.remove(recordKeyV2(id))
+        await epochStore.remove(recordKeyV2(id))
         await removeV2FilesForRecord(id)
       }
     }
   } else if (isV2RecordKey(key)) {
     const id = parseRecordIdFromKey(key)
     if (id) {
-      await activeVaultInstance.remove(recordKeyV1(id))
+      await epochStore.remove(recordKeyV1(id))
     }
   } else if (isV1FileKey(key)) {
     if (!blockV1DeleteMirror) {
       const v2Key = v1FileKeyToV2(key)
       if (v2Key) {
-        await activeVaultInstance.remove(v2Key)
+        await epochStore.remove(v2Key)
       }
     }
   } else if (isV2FileKey(key)) {
     const parsed = parseFileKey(key)
     if (parsed) {
-      await activeVaultInstance.remove(
-        fileKeyV1(parsed.recordId, parsed.fileId)
-      )
+      await epochStore.remove(fileKeyV1(parsed.recordId, parsed.fileId))
     }
   }
 }
@@ -1180,8 +1249,7 @@ export const activeVaultList = async (filterKey, options = {}) => {
 
   // App login list: prefer v2 when present (merge namespaces by id).
   if (filterKey === 'record/' || filterKey === 'record-v2/') {
-    const entries = await collectEntriesByFilter(
-      activeVaultInstance,
+    const entries = await collectActiveVaultEntries(
       (key) => isV1RecordKey(key) || isV2RecordKey(key)
     )
     const byId = new Map()
@@ -1200,10 +1268,11 @@ export const activeVaultList = async (filterKey, options = {}) => {
     return [...byId.values()].map(enrich)
   }
 
-  const results = await collectValuesByFilter(
-    activeVaultInstance,
-    filterKey ? (key) => key?.startsWith(filterKey) : undefined
-  )
+  const results = (
+    await collectActiveVaultEntries(
+      filterKey ? (key) => key?.startsWith(filterKey) : undefined
+    )
+  ).map(({ value }) => value)
 
   if (filterKey?.startsWith('record/') || filterKey?.startsWith('record-v2/')) {
     return results.map(enrich)
@@ -1220,6 +1289,33 @@ export const activeVaultGetWriterKey = () => {
     throw new Error('Vault not initialised')
   }
   return b4a.toString(activeVaultInstance.writerKey, 'hex')
+}
+
+/**
+ * Rotate the vault epoch when the roster changed, or start the first one.
+ * @param {{ start?: boolean }} [options]
+ * @returns {Promise<object>} the epoch store's rotation result
+ */
+export const activeVaultEnsureEpoch = async ({ start = false } = {}) => {
+  if (!isActiveVaultInitialized || !epochStore) {
+    throw new Error('Vault not initialised')
+  }
+  // The store hands a caller the rotation already in flight, whatever its
+  // options. Let a background start:false finish so kick and leave are not
+  // answered with 'legacy'.
+  while (start && epochSync) await epochSync
+  if (!epochStore) throw new Error('Vault not initialised')
+  return epochStore.ensureEpoch({ start })
+}
+
+/**
+ * @returns {Promise<object>} the epoch status of the active vault
+ */
+export const activeVaultGetEpochStatus = async () => {
+  if (!isActiveVaultInitialized || !epochStore) {
+    throw new Error('Vault not initialised')
+  }
+  return epochStore.status()
 }
 
 /**
@@ -1245,17 +1341,10 @@ export const activeVaultFind = async ({
     throw new Error('Vault not initialised')
   }
 
-  const stream = activeVaultInstance.base.view.find('@autopass/records', {
-    gte,
-    lte,
-    gt,
-    lt,
-    limit,
-    reverse
-  })
+  const records = await epochStore.find({ gte, lte, gt, lt, limit, reverse })
 
   const results = []
-  for await (const record of stream) {
+  for (const record of records) {
     if (!record?.value) continue
     let value
     try {
@@ -1300,7 +1389,7 @@ export const activeVaultGet = async (key) => {
     return enrichRecordForClient(found.record)
   }
 
-  const res = await activeVaultInstance.get(key)
+  const res = await epochStore.get(key)
 
   if (!res || !res.value) {
     return null
@@ -1326,7 +1415,7 @@ export const createInvite = async () => {
   await activeVaultInstance.deleteInvite()
   const inviteCode = await activeVaultInstance.createInvite()
 
-  const response = await activeVaultInstance.get('vault')
+  const response = await epochStore.get('vault')
   const { value: vault } = response || {}
   if (!vault) {
     throw new Error('Vault not found')
@@ -1345,7 +1434,7 @@ export const createInvite = async () => {
 export const deleteInvite = async () => {
   await activeVaultInstance.deleteInvite()
 
-  const response = await activeVaultInstance.get('vault')
+  const response = await epochStore.get('vault')
   const { value: vault } = response || {}
 
   if (!vault) {
@@ -1398,14 +1487,19 @@ export const initListener = async ({ vaultId, onUpdate }) => {
     return
   }
 
-  activeVaultInstance.removeAllListeners()
+  // Only drop our own listener: the epoch store listens to 'update' too.
+  if (activeVaultUpdateListener) {
+    activeVaultInstance.removeListener('update', activeVaultUpdateListener)
+  }
 
-  activeVaultInstance.on('update', () => {
+  activeVaultUpdateListener = () => {
     // Peer/echo updates: incremental reconcile before UI refetch (no full remigrate).
     scheduleIncrementalReconcile(() => {
       onUpdate?.()
+      void syncEpoch({ ensure: true })
     })
-  })
+  }
+  activeVaultInstance.on('update', activeVaultUpdateListener)
 
   listeningVaultId = vaultId
   lastOnUpdateCallback = onUpdate
@@ -1752,7 +1846,7 @@ const activeVaultGetRaw = async (key) => {
     throw new Error('Vault not initialised')
   }
 
-  const res = await activeVaultInstance.get(key)
+  const res = await epochStore.get(key)
   if (!res || !res.value) return null
   return JSON.parse(res.value)
 }
@@ -1933,8 +2027,7 @@ export const findOtpDuplicates = async ({ secret, excludeRecordId } = {}) => {
 
   if (!secret) return []
 
-  const entries = await collectEntriesByFilter(
-    activeVaultInstance,
+  const entries = await collectActiveVaultEntries(
     (key) => isV1RecordKey(key) || isV2RecordKey(key)
   )
   const byId = new Map()
@@ -1963,8 +2056,7 @@ export const exportOtpRecords = async () => {
     throw new Error('Vault not initialised')
   }
 
-  const entries = await collectEntriesByFilter(
-    activeVaultInstance,
+  const entries = await collectActiveVaultEntries(
     (key) => isV1RecordKey(key) || isV2RecordKey(key)
   )
   const byId = new Map()
