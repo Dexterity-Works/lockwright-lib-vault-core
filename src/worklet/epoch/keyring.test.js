@@ -21,6 +21,16 @@ const keyPair = () => {
 
 const member = (id, kp) => ({ id, masterTopic: kp.publicKey.toString('hex') })
 
+// Seals any JSON, not only a key map, the way sealRing would.
+const sealAs = (json, kp) => {
+  const message = Buffer.from(JSON.stringify(json))
+  const curvePk = Buffer.alloc(sodium.crypto_box_PUBLICKEYBYTES)
+  sodium.crypto_sign_ed25519_pk_to_curve25519(curvePk, kp.publicKey)
+  const box = Buffer.alloc(message.length + sodium.crypto_box_SEALBYTES)
+  sodium.crypto_box_seal(box, message, curvePk)
+  return box.toString('base64')
+}
+
 const editEnvelope = (envelope, edit) =>
   JSON.stringify({ ...JSON.parse(envelope), ...edit })
 
@@ -166,5 +176,34 @@ describe('keyring', () => {
         EpochDecryptError
       )
     }
+  })
+
+  it('throws EpochDecryptError on bad base64, non-string c, or the wrong key', () => {
+    const plain = encryptValue('e1', ring.e1, 'v').envelope
+    const cases = [
+      [editEnvelope(plain, { c: 5 }), ring],
+      [editEnvelope(plain, { c: ['AAAA'] }), ring],
+      [editEnvelope(plain, { c: '!!!!' }), ring],
+      [editEnvelope(plain, { n: '!!!!' }), ring],
+      // A valid key, but not the one this epoch was sealed with.
+      [plain, { e1: ring.e2 }],
+      ['[]', ring],
+      ['{"$enc":"1"}', ring]
+    ]
+
+    for (const [envelope, keys] of cases) {
+      expect(() => decryptValue(envelope, keys)).toThrow(EpochDecryptError)
+    }
+    expect(() => decryptValue(plain, { e1: 42 })).toThrow(
+      EpochKeyUnavailableError
+    )
+  })
+
+  it('opens no ring from a box that is not a sealed key map', () => {
+    expect(openRing(sealAs([ring.e1], a), a)).toBeNull()
+    expect(openRing(sealAs('just a string', a), a)).toBeNull()
+    expect(openRing(sealAs(null, a), a)).toBeNull()
+    expect(openRing(123, a)).toBeNull()
+    expect(openRing(Buffer.alloc(8).toString('base64'), a)).toBeNull()
   })
 })
