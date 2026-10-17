@@ -1240,6 +1240,20 @@ describe('appDeps module functions (excluding encryption)', () => {
       expect(appDeps.getVaultMigrationStatus().ready).toBe(false)
     })
 
+    test('opens a vault whose migration waits on an epoch rotation', async () => {
+      vault.put('device/other', deviceRow('other', makeSignKeyPair()))
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      vault.put(
+        'record/r1',
+        JSON.stringify({ id: 'r1', type: 'note', data: { title: 'x' } })
+      )
+      vault.rows.delete('device/other')
+      await reopen({ writable: false })
+
+      expect(appDeps.getIsActiveVaultInitialized()).toBe(true)
+      expect(vault.rows.has('record-v2/r1')).toBe(false)
+    })
+
     test('activeVaultAdd refuses to write under an epoch that still lists a removed device', async () => {
       vault.put('device/other', deviceRow('other', makeSignKeyPair()))
       await appDeps.activeVaultEnsureEpoch({ start: true })

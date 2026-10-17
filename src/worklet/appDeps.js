@@ -764,10 +764,18 @@ export const initActiveVaultInstance = async ({ id, encryptionKey }) => {
     try {
       await runVaultMigration()
     } catch (error) {
-      // A device not yet in the latest epoch cannot write; open anyway so
-      // it can show its epoch status. Migration reruns on the next open.
-      if (!(error instanceof EpochKeyUnavailableError)) throw error
-      workletLogger.warn('vault migration deferred: no epoch key yet')
+      // A device not yet in the latest epoch, or one that cannot rotate an
+      // epoch that still lists a removed device, cannot write; open anyway
+      // so it can show its epoch status. Migration reruns on the next open.
+      if (
+        !(error instanceof EpochKeyUnavailableError) &&
+        !(error instanceof EpochRotationPendingError)
+      ) {
+        throw error
+      }
+      workletLogger.warn('vault migration deferred: cannot write the epoch', {
+        error: error.name
+      })
     }
 
     if (lastOnUpdateCallback) {
