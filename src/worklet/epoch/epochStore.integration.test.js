@@ -833,6 +833,37 @@ describe('epochStore over real Autopass', () => {
     expect(await value(A, 'record/b')).toBe('from B')
   })
 
+  it('names a roster row by its key, ignoring a row that claims another id', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    const attacker = makeKeyPair()
+    // device/0 sorts before device/B, so a first-row-wins scan meets it first.
+    await A.instance.add(
+      'device/0',
+      JSON.stringify({ ...rowFor('0', attacker), id: 'B' })
+    )
+    const first = await A.store.ensureEpoch({ start: true })
+    expect(first).toMatchObject({ members: ['A', 'B'], uncovered: [] })
+    await A.store.add('record/x', 'v')
+    await sync(A, B)
+    expect(await value(B, 'record/x')).toBe('v')
+
+    // Nor does the row make its key an author.
+    const id = 'ff'.repeat(16)
+    const planted = epochBy(attacker, {
+      id,
+      seq: 2,
+      prev: first.id,
+      ring: { [id]: generateEpochKey() },
+      to: [['0', attacker]]
+    })
+    await A.instance.add(`epoch/${id}`, JSON.stringify(planted))
+    expect(await A.store.status()).toMatchObject({
+      epoch: first.id,
+      members: ['A', 'B'],
+      uncovered: []
+    })
+  })
+
   it('refuses add and remove on epoch keys', async () => {
     const [A] = await setup(['A'])
     const { id } = await A.store.ensureEpoch({ start: true })

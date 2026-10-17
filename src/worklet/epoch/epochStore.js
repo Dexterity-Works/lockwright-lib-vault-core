@@ -127,12 +127,21 @@ export const createEpochStore = ({
     offered.get(epochId).add(key)
   }
 
+  // A row is the device its key names. One whose value names another id is
+  // malformed: it is not sealed to, not an author, and not uncovered, so a
+  // planted row cannot stand in for a real device.
   const readRoster = async () =>
     (await readPrefix('device/'))
-      .filter(({ value }) => value && typeof value === 'object')
-      .map(({ key, value }) => ({
+      .map(({ key, value }) => ({ id: key.slice('device/'.length), value }))
+      .filter(
+        ({ id, value }) =>
+          value &&
+          typeof value === 'object' &&
+          (value.id === undefined || value.id === id)
+      )
+      .map(({ id, value }) => ({
         ...value,
-        id: value.id ?? key.slice(7),
+        id,
         // Anything but a usable key string counts as no masterTopic.
         masterTopic: canSealTo(value.masterTopic)
           ? value.masterTopic
