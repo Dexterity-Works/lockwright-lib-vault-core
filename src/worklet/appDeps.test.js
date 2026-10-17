@@ -266,6 +266,7 @@ global.Bare = {
   platform: 'posix' // Unix-like for tests
 }
 
+import Autopass from 'autopass'
 import bareFs from 'bare-fs'
 
 import * as appDeps from './appDeps'
@@ -277,8 +278,7 @@ const mockSodium = require('sodium-native')
 
 // In-memory records behind the mocked active vault: add/get/remove and a
 // HyperDB-style range find, so the real epoch store runs over it.
-const useMemoryVault = (instance) => {
-  const rows = new Map()
+const useMemoryVault = (instance, rows = new Map()) => {
   const inRange = (key, { gte, gt, lte, lt } = {}) =>
     (!gte || key >= gte.key) &&
     (!gt || key > gt.key) &&
@@ -1102,6 +1102,31 @@ describe('appDeps module functions (excluding encryption)', () => {
       }
     }
 
+    // Close the active vault and open it again over the same rows, so its
+    // migration runs over them.
+    const reopen = async ({ writable = true } = {}) => {
+      const { rows } = vault
+      await appDeps.closeActiveVaultInstance()
+      const make = Autopass.getMockImplementation()
+      Autopass.mockImplementationOnce((...args) => {
+        const instance = make(...args)
+        vault = useMemoryVault(instance, rows)
+        instance.base.writable = writable
+        return instance
+      })
+      await appDeps.initActiveVaultInstance({
+        id: 'vault1',
+        encryptionKey: 'key'
+      })
+    }
+
+    const unreadable = JSON.stringify({
+      $enc: 1,
+      e: 'ff'.repeat(16),
+      n: 'AA==',
+      c: 'AA=='
+    })
+
     // A rostered device `other` writes epoch `seq` after `prev`, sealed to
     // itself only.
     const putForeignEpoch = (seq = 1, prev = null) => {
@@ -1185,6 +1210,34 @@ describe('appDeps module functions (excluding encryption)', () => {
         canRead: false,
         revoked: false
       })
+    })
+
+    test('activeVaultAdd leaves a v2 twin it cannot read alone', async () => {
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      vault.put('record-v2/r1', unreadable)
+
+      await appDeps.activeVaultAdd('record/r1', {
+        id: 'r1',
+        type: 'note',
+        data: { title: 'edited' }
+      })
+      expect(await appDeps.activeVaultGet('record/r1')).toMatchObject({
+        data: { title: 'edited' }
+      })
+      expect(vault.rows.get('record-v2/r1').value).toBe(unreadable)
+    })
+
+    test('the migration leaves a record it cannot fully read alone', async () => {
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      vault.put(
+        'record/r1',
+        JSON.stringify({ id: 'r1', type: 'note', data: { title: 'stale' } })
+      )
+      vault.put('record-v2/r1', unreadable)
+      await reopen()
+
+      expect(vault.rows.get('record-v2/r1').value).toBe(unreadable)
+      expect(appDeps.getVaultMigrationStatus().ready).toBe(false)
     })
 
     test('activeVaultAdd refuses to write under an epoch that still lists a removed device', async () => {
@@ -1342,12 +1395,6 @@ describe('appDeps module functions (excluding encryption)', () => {
 
     describe('incremental reconcile', () => {
       const v1 = { id: 'r1', type: 'note', data: { title: 'kept' } }
-      const unreadable = JSON.stringify({
-        $enc: 1,
-        e: 'ff'.repeat(16),
-        n: 'AA==',
-        c: 'AA=='
-      })
 
       // A v1 record the reconcile has already seen, with its v2 twin.
       const seenRecord = async () => {
@@ -1376,6 +1423,29 @@ describe('appDeps module functions (excluding encryption)', () => {
         expect(await appDeps.activeVaultGet('record-v2/r1')).toMatchObject({
           data: { title: 'kept' }
         })
+      })
+
+      test('does not rebuild a v2 record it cannot read from its v1', async () => {
+        const fireUpdate = await seenRecord()
+        vault.put('record-v2/r1', unreadable)
+        vault.put('record/r1', JSON.stringify({ ...v1, data: { title: 'v1' } }))
+        await fireUpdate()
+
+        expect(vault.rows.get('record-v2/r1').value).toBe(unreadable)
+      })
+
+      test('does not copy a v1 file over a v2 file it cannot read', async () => {
+        const fireUpdate = await listen()
+        await appDeps.activeVaultEnsureEpoch({ start: true })
+        await appDeps.activeVaultAdd(
+          'record/r1/file/f1',
+          { name: 'a.txt' },
+          Buffer.from('bytes')
+        )
+        vault.put('record-v2/r1/file/f1', unreadable)
+        await fireUpdate()
+
+        expect(vault.rows.get('record-v2/r1/file/f1').value).toBe(unreadable)
       })
 
       test('deletes nothing while the latest epoch is unreadable here', async () => {

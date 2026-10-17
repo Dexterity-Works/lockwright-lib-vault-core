@@ -351,8 +351,13 @@ export const buildRecordUpdatedAtIndex = (records) => {
  *   getWithFile: (key: string) => Promise<{ value: object|null, file: Buffer|null }>,
  *   addJson: (key: string, data: object, file?: Buffer|null) => Promise<void>,
  *   remove: (key: string) => Promise<void>,
- *   listEntries: () => Promise<Array<{ key: string, value: object|null }>>
+ *   listEntries: () => Promise<Array<{ key: string, value: object|null }>>,
+ *   skipIds?: Set<string>
  * }} VaultAdapter
+ *
+ * `skipIds`, read once `listEntries` returned: record ids with a row the
+ * listing left out because it could not be read. Their records and files
+ * are neither converted, merged, copied, nor deleted.
  */
 
 /**
@@ -419,15 +424,20 @@ export const migrateToSchema2 = async (vault, options = {}) => {
   }
 
   const entries = await vault.listEntries()
+  const skipIds = vault.skipIds ?? new Set()
   const { v1Records, v2Records, v1FileKeys, v2FileKeys } =
     partitionNamespaceEntries(entries)
 
   const v2FileSet = new Set(v2FileKeys)
   const filesToCopy = v1FileKeys.filter((v1Key) => {
     const v2Key = v1FileKeyToV2(v1Key)
-    return v2Key && !v2FileSet.has(v2Key)
-  }).length
-  const total = v1Records.size + filesToCopy
+    return (
+      v2Key &&
+      !v2FileSet.has(v2Key) &&
+      !skipIds.has(parseFileKey(v1Key).recordId)
+    )
+  })
+  const total = v1Records.size + filesToCopy.length
   let done = 0
   onProgress?.({ done, total })
 
@@ -436,7 +446,9 @@ export const migrateToSchema2 = async (vault, options = {}) => {
 
   for (const [id, v1Record] of v1Records) {
     const existingV2 = v2Records.get(id)
-    if (!existingV2) {
+    if (skipIds.has(id)) {
+      // Left incomplete, so the migration runs again once it can read it.
+    } else if (!existingV2) {
       const v2 = convertV1RecordToV2(v1Record)
       await vault.addJson(recordKeyV2(id), v2)
       v2Records.set(id, v2)
@@ -453,10 +465,8 @@ export const migrateToSchema2 = async (vault, options = {}) => {
     onProgress?.({ done, total })
   }
 
-  for (const v1Key of v1FileKeys) {
+  for (const v1Key of filesToCopy) {
     const v2Key = v1FileKeyToV2(v1Key)
-    if (!v2Key || v2FileSet.has(v2Key)) continue
-
     const { value, file } = await vault.getWithFile(v1Key)
     await vault.addJson(
       v2Key,
@@ -515,6 +525,7 @@ export const reconcileDualStore = async (vault, options = {}) => {
   const blockV1DeleteMirror = options.blockV1DeleteMirror === true
 
   const entries = await vault.listEntries()
+  const skipIds = vault.skipIds ?? new Set()
   const { v1Records, v2Records, v1FileKeys, v2FileKeys } =
     partitionNamespaceEntries(entries)
 
@@ -523,6 +534,7 @@ export const reconcileDualStore = async (vault, options = {}) => {
   let filesCopied = 0
 
   for (const [id, v1Record] of v1Records) {
+    if (skipIds.has(id)) continue
     const existingV2 = v2Records.get(id)
     if (!existingV2) {
       const v2 = convertV1RecordToV2(v1Record)
@@ -541,7 +553,7 @@ export const reconcileDualStore = async (vault, options = {}) => {
 
   if (!blockV1DeleteMirror) {
     for (const id of previousV1Ids) {
-      if (v1Records.has(id)) continue
+      if (v1Records.has(id) || skipIds.has(id)) continue
       if (!v2Records.has(id)) continue
       await vault.remove(recordKeyV2(id))
       // Remove v2 files for this record
@@ -560,6 +572,7 @@ export const reconcileDualStore = async (vault, options = {}) => {
   for (const v1Key of v1FileKeys) {
     const v2Key = v1FileKeyToV2(v1Key)
     if (!v2Key || v2FileSet.has(v2Key)) continue
+    if (skipIds.has(parseFileKey(v1Key).recordId)) continue
     const { value, file } = await vault.getWithFile(v1Key)
     await vault.addJson(
       v2Key,

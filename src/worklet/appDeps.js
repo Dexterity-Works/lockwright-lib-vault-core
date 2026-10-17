@@ -329,32 +329,65 @@ const collectActiveVaultEntries = async (filterFn, onUnreadable) => {
   return results
 }
 
+const recordIdOfKey = (key) =>
+  parseRecordIdFromKey(key) ?? parseFileKey(key)?.recordId ?? null
+
 /**
- * @returns {import('./utils/recordNamespaces.js').VaultAdapter}
+ * `listEntries` leaves out rows this device cannot read and collects them:
+ * `unreadableKeys` holds their keys, `skipIds` their record ids. Treating
+ * such a row as missing would seal stale content over it.
+ * @returns {import('./utils/recordNamespaces.js').VaultAdapter & { unreadableKeys: Set<string> }}
  */
-const createActiveVaultAdapter = () => ({
-  getJson: activeVaultGetRaw,
-  getWithFile: async (key) => {
-    const res = await epochStore.get(key)
-    if (!res) return { value: null, file: null }
-    let value = null
-    if (res.value) {
-      try {
-        value = JSON.parse(res.value)
-      } catch {
-        value = {}
+const createActiveVaultAdapter = () => {
+  const unreadableKeys = new Set()
+  const skipIds = new Set()
+  return {
+    getJson: activeVaultGetRaw,
+    getWithFile: async (key) => {
+      const res = await epochStore.get(key)
+      if (!res) return { value: null, file: null }
+      let value = null
+      if (res.value) {
+        try {
+          value = JSON.parse(res.value)
+        } catch {
+          value = {}
+        }
       }
+      return { value, file: res.file || null }
+    },
+    addJson: async (key, data, file = null) => {
+      await epochStore.add(key, JSON.stringify(data), file || undefined)
+    },
+    remove: async (key) => {
+      await epochStore.remove(key)
+    },
+    listEntries: async () =>
+      collectActiveVaultEntries(undefined, (key) => {
+        unreadableKeys.add(key)
+        const id = recordIdOfKey(key)
+        if (id) skipIds.add(id)
+      }),
+    unreadableKeys,
+    skipIds
+  }
+}
+
+/**
+ * @param {string} key
+ * @returns {Promise<boolean>} whether the row exists but cannot be read here
+ */
+const isUnreadableRow = async (key) => {
+  let unreadable = false
+  await epochStore.find({
+    gte: { key },
+    lte: { key },
+    onUnreadable: () => {
+      unreadable = true
     }
-    return { value, file: res.file || null }
-  },
-  addJson: async (key, data, file = null) => {
-    await epochStore.add(key, JSON.stringify(data), file || undefined)
-  },
-  remove: async (key) => {
-    await epochStore.remove(key)
-  },
-  listEntries: async () => collectActiveVaultEntries()
-})
+  })
+  return unreadable
+}
 
 const refreshPreviousV1RecordIds = async () => {
   const entries = await collectActiveVaultEntries(isV1RecordKey)
@@ -416,20 +449,17 @@ const runIncrementalReconcile = async () => {
 
   const vaultExt = (await activeVaultGetRaw(VAULT_EXT_KEY)) || {}
   const { canRead } = await epochStore.status()
-  let unreadable = false
-  const entries = await collectActiveVaultEntries(undefined, () => {
-    unreadable = true
-  })
-  const adapter = {
-    ...createActiveVaultAdapter(),
-    listEntries: async () => entries
-  }
+  const listing = createActiveVaultAdapter()
+  const entries = await listing.listEntries()
+  const adapter = { ...listing, listEntries: async () => entries }
   const result = await reconcileDualStore(adapter, {
     previousV1Ids: previousV1RecordIds,
     // A v1 record this device cannot read looks deleted; mirroring that
     // would delete a v2 record it never saw change.
     blockV1DeleteMirror:
-      vaultExt.blockV1DeleteMirror === true || !canRead || unreadable
+      vaultExt.blockV1DeleteMirror === true ||
+      !canRead ||
+      listing.unreadableKeys.size > 0
   })
   previousV1RecordIds = result.previousV1Ids
 }
@@ -939,7 +969,9 @@ export const activeVaultAdd = async (key, data, file, fileName) => {
     // Local dual-write / projection (companion namespace). Uses the store directly to avoid recursion.
     if (isV1RecordKey(key)) {
       const id = parseRecordIdFromKey(key)
-      if (id) {
+      // A v2 twin this device cannot read is not missing: rebuilding it
+      // from v1 would seal over content it never saw.
+      if (id && !(await isUnreadableRow(recordKeyV2(id)))) {
         const existingV2 = await activeVaultGetRaw(recordKeyV2(id))
         const nextV2 =
           mergeV1IntoV2(data, existingV2) ||
