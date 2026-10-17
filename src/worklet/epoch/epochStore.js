@@ -195,7 +195,8 @@ export const createEpochStore = ({
 
   const coverage = () => {
     const sealable = new Map()
-    const uncovered = []
+    const sealedWriters = new Set()
+    const rest = []
     for (const row of roster) {
       if (
         typeof row.masterTopic === 'string' &&
@@ -204,10 +205,16 @@ export const createEpochStore = ({
         if (!sealable.has(row.id)) {
           sealable.set(row.id, { id: row.id, masterTopic: row.masterTopic })
         }
+        if (row.writerKey) sealedWriters.add(row.writerKey)
       } else {
-        uncovered.push(row.id)
+        rest.push(row)
       }
     }
+    // A row without masterTopic that shares a writer with a sealable row is
+    // a stale copy of a device that already has a key.
+    const uncovered = rest
+      .filter((row) => !row.writerKey || !sealedWriters.has(row.writerKey))
+      .map((row) => row.id)
     return { sealable: [...sealable.values()], uncovered }
   }
 

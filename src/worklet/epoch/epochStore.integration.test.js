@@ -330,6 +330,8 @@ describe('epochStore over real Autopass', () => {
   it('stays plaintext in a legacy vault and reports uncovered rows', async () => {
     const [A] = await setup(['A'])
     await addDevice(A, { id: 'L', name: 'legacy device', createdAt: 1 })
+    // A stale row of A from before it had a masterTopic is not uncovered.
+    await addDevice(A, { id: 'A-old', writerKey: A.row.writerKey })
     await A.store.add('record/a', '{"title":"a"}')
 
     expect((await A.instance.get('record/a')).value).toBe('{"title":"a"}')
