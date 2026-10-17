@@ -389,6 +389,18 @@ export const createEpochStore = ({
     return next.promise
   }
 
+  // My row is the one with my masterTopic, or with my writer key when it
+  // has none (a legacy or not yet healed row).
+  const isMyRow = (row, keyPair) => {
+    if (isMe(row.masterTopic, keyPair)) return true
+    const writerKey = instance.writerKey?.toString('hex')
+    return (
+      !!writerKey &&
+      typeof row.writerKey === 'string' &&
+      row.writerKey.toLowerCase() === writerKey
+    )
+  }
+
   const status = async () => {
     await ensureFresh()
     const keyPair = await getPersonalKeyPair()
@@ -409,7 +421,7 @@ export const createEpochStore = ({
         !canRead &&
         Object.keys(ring).length > 0 &&
         instance.base.local?.length > 0 &&
-        !roster.some((row) => isMe(row.masterTopic, keyPair)),
+        !roster.some((row) => isMyRow(row, keyPair)),
       members: latest ? Object.keys(latest.members).sort() : [],
       uncovered: coverage().uncovered
     }

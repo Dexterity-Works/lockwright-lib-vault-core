@@ -687,5 +687,11 @@ describe('epochStore over real Autopass', () => {
     expect(await revokedFor({ myRow: (X) => rowFor('X', X.keyPair) })).toBe(
       false
     )
+    // My row without a masterTopic still names me by its writer key.
+    expect(
+      await revokedFor({
+        myRow: (X) => ({ id: 'X', writerKey: X.row.writerKey })
+      })
+    ).toBe(false)
   })
 })
