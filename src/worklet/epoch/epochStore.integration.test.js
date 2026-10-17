@@ -586,4 +586,25 @@ describe('epochStore over real Autopass', () => {
     expect(await A.instance.get('epoch/new')).toBeNull()
     expect((await A.store.status()).epoch).toBe(id)
   })
+
+  it('retries a refresh that failed instead of replaying the failure', async () => {
+    const [A] = await setup(['A'])
+    await A.store.ensureEpoch({ start: true })
+    await A.store.add('record/r', 'v')
+    let fail = false
+    const store = createEpochStore({
+      instance: A.instance,
+      getPersonalKeyPair: async () => {
+        if (!fail) return A.keyPair
+        fail = false
+        throw new Error('key store busy')
+      }
+    })
+    expect((await store.get('record/r')).value).toBe('v')
+
+    fail = true
+    await expect(store.refresh()).rejects.toThrow('key store busy')
+    expect((await store.get('record/r')).value).toBe('v')
+    expect((await store.status()).canRead).toBe(true)
+  })
 })

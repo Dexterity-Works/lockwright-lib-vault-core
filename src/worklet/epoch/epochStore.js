@@ -142,9 +142,20 @@ export const createEpochStore = ({
     refreshedAt = startedAt
   }
 
+  // A failed refresh leaves the store stale, so the next read tries again
+  // instead of replaying the rejection until the next update.
+  const tryRefresh = async () => {
+    try {
+      await doRefresh()
+    } catch (error) {
+      refreshedAt = -1
+      throw error
+    }
+  }
+
   /** Re-read the roster and epoch records, opening any new rings. */
   const refresh = () => {
-    refreshing = refreshing.then(doRefresh, doRefresh)
+    refreshing = refreshing.then(tryRefresh, tryRefresh)
     return refreshing
   }
 
