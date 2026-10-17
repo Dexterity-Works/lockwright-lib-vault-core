@@ -1,7 +1,8 @@
 import {
   generateEpochId,
   buildEpochRecord,
-  resolveEpochs
+  resolveEpochs,
+  verifySignature
 } from './epochRecord.js'
 import {
   canSealTo,
@@ -73,6 +74,9 @@ export const createEpochStore = ({
   // epochId -> every key b64 an opened box offered for it.
   const offered = new Map()
   const openedRecords = new Set()
+  // `${key}:${sig}` -> { raw, ok }. The raw value is part of the hit, so a
+  // row rewritten under the same key with a copied sig is verified again.
+  const verified = new Map()
   const loggedKeys = new Set()
   let updates = 0
   let refreshedAt = -1
@@ -102,7 +106,11 @@ export const createEpochStore = ({
       prefixRange(prefix)
     )) {
       try {
-        rows.push({ key: record.key, value: JSON.parse(record.value) })
+        rows.push({
+          key: record.key,
+          value: JSON.parse(record.value),
+          raw: record.value
+        })
       } catch {
         logOnce(record.key, 'epochStore: unparsable row')
       }
@@ -127,12 +135,21 @@ export const createEpochStore = ({
           : undefined
       }))
 
+  const verifyOnce = (record, { key, raw }) => {
+    const cacheKey = `${key}:${record?.sig}`
+    const hit = verified.get(cacheKey)
+    if (hit?.raw === raw) return hit.ok
+    const ok = verifySignature(record)
+    verified.set(cacheKey, { raw, ok })
+    return ok
+  }
+
   const doRefresh = async () => {
     const startedAt = updates
     const keyPair = await getPersonalKeyPair()
     const nextRoster = await readRoster()
     const records = await readPrefix('epoch/')
-    const next = resolveEpochs(records, nextRoster)
+    const next = resolveEpochs(records, nextRoster, { verify: verifyOnce })
 
     for (const { key, value } of records) {
       if (!next.signed.includes(value)) {

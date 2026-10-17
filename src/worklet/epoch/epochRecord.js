@@ -172,7 +172,7 @@ const compare = (a, b) =>
  *
  * @param {Array<{ key: string, value: unknown }>} entries
  * @param {Array<{ masterTopic?: string }>} roster
- * @param {{ verify?: (record: unknown) => boolean }} [opts]
+ * @param {{ verify?: (record: unknown, entry: object) => boolean }} [opts]
  * @returns {{ signed: object[], accepted: object[], latest: object | null }}
  */
 export const resolveEpochs = (
@@ -181,9 +181,10 @@ export const resolveEpochs = (
   { verify = verifySignature } = {}
 ) => {
   const byId = new Map()
-  for (const { key, value: record } of entries) {
+  for (const entry of entries) {
+    const { key, value: record } = entry
     if (key !== `epoch/${record?.id}`) continue
-    if (!verify(record)) continue
+    if (!verify(record, entry)) continue
     byId.set(record.id, byId.has(record.id) ? null : record)
   }
   // A prev always has the lower seq, so one pass in seq order settles the

@@ -1021,6 +1021,38 @@ describe('epochStore over real Autopass', () => {
     expect(unreadable).toEqual(['record/2'])
   })
 
+  it('verifies an epoch row once, and again once it changes', async () => {
+    const [A] = await setup(['A'])
+    const { id } = await A.store.ensureEpoch({ start: true })
+    const store = createEpochStore({
+      instance: A.instance,
+      getPersonalKeyPair: async () => A.keyPair
+    })
+    const verify = jest.spyOn(sodium, 'crypto_sign_verify_detached')
+    // Hypercore verifies its blocks too; count only A's epoch signatures.
+    const epochVerifies = () =>
+      verify.mock.calls.filter(([, , key]) => key.equals(A.keyPair.publicKey))
+        .length
+    try {
+      await store.refresh()
+      expect(epochVerifies()).toBe(1)
+      await store.refresh()
+      expect(epochVerifies()).toBe(1)
+
+      // Same key and sig over other bytes: verified again, and refused.
+      const record = JSON.parse((await A.instance.get(`epoch/${id}`)).value)
+      await A.instance.add(
+        `epoch/${id}`,
+        JSON.stringify({ ...record, createdAt: record.createdAt + 1 })
+      )
+      await store.refresh()
+      expect(epochVerifies()).toBe(2)
+      expect((await store.status()).legacy).toBe(true)
+    } finally {
+      verify.mockRestore()
+    }
+  })
+
   it('does not move latest back when an older epoch is appended again', async () => {
     const [A, B] = await setup(['A', 'B'])
     // The older epoch sorts last by key and is appended last, so only seq
