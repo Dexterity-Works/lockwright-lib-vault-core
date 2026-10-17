@@ -931,6 +931,37 @@ describe('epochStore over real Autopass', () => {
     })
   })
 
+  it('leaves an owed start in place when a run cannot read it', async () => {
+    const [A] = await setup(['A'])
+    Object.defineProperty(A.instance.base, 'writable', {
+      value: false,
+      configurable: true
+    })
+    await A.store.ensureEpoch({ start: true })
+    delete A.instance.base.writable
+
+    // Only the store's read fails: setUserData reads through getUserData.
+    const { local } = A.instance.base
+    local.getUserData = async () => {
+      delete local.getUserData
+      throw new Error('disk busy')
+    }
+    const restart = () =>
+      createEpochStore({
+        instance: A.instance,
+        getPersonalKeyPair: async () => A.keyPair
+      })
+    expect(await restart().ensureEpoch({ start: false })).toMatchObject({
+      rotated: false,
+      reason: 'legacy'
+    })
+
+    expect(await restart().ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      seq: 1
+    })
+  })
+
   it('does not move latest back when an older epoch is appended again', async () => {
     const [A, B] = await setup(['A', 'B'])
     // The older epoch sorts last by key and is appended last, so only seq

@@ -22,6 +22,8 @@ const RECORDS = '@autopass/records'
 // Local core userData, so an owed start survives a restart.
 const START_OWED = 'lockwright/epoch-start-owed'
 const noopLogger = { warn: () => {} }
+// The owed start could not be read, so nobody knows whether it is owed.
+const OWED_UNREAD = Symbol('owed start unread')
 
 /**
  * Keys that stay plaintext once the vault has an epoch. `vault-ext` is
@@ -418,7 +420,7 @@ export const createEpochStore = ({
       logger.warn('epochStore: could not read the owed start', {
         error: error?.name
       })
-      return false
+      return OWED_UNREAD
     }
   }
 
@@ -439,7 +441,8 @@ export const createEpochStore = ({
 
   const runEnsure = (start) => {
     const run = (async () => {
-      const owed = start || (await readStartOwed())
+      const stored = start || (await readStartOwed())
+      const owed = stored === true
       let result
       try {
         result = await doEnsureEpoch({ start: owed })
@@ -451,7 +454,8 @@ export const createEpochStore = ({
         result.rotated ||
         result.reason === 'current' ||
         result.reason === 'pending'
-      await writeStartOwed(settled ? false : owed)
+      // A run that could not read the flag must not overwrite it.
+      if (stored !== OWED_UNREAD) await writeStartOwed(settled ? false : owed)
       return result
     })().finally(() => {
       if (ensuring === run) ensuring = null
