@@ -8,7 +8,7 @@ import sodium from 'sodium-native'
 
 import { buildEpochRecord } from './epochRecord.js'
 import { createEpochStore } from './epochStore.js'
-import { EpochRecordWriteError } from './keyring.js'
+import { EpochRecordWriteError, generateEpochKey, sealRing } from './keyring.js'
 
 jest.setTimeout(60000)
 
@@ -130,6 +130,75 @@ const value = async (peer, key) => (await peer.store.get(key))?.value ?? null
 
 const rawEnvelope = async (peer, key) =>
   JSON.parse((await peer.instance.get(key)).value)
+
+// An epoch record by `author`, sealing `ring` to each [deviceId, keyPair].
+const epochBy = (author, { id, seq, prev = null, ring, to }) => {
+  const rows = to.map(([deviceId, kp]) => ({
+    id: deviceId,
+    masterTopic: kp.publicKey.toString('hex')
+  }))
+  const boxes = sealRing(ring, rows)
+  const members = Object.fromEntries(
+    rows.map(({ id: deviceId, masterTopic }) => [
+      deviceId,
+      { topic: masterTopic, box: boxes[deviceId] }
+    ])
+  )
+  return buildEpochRecord({ id, seq, prev, members, personalKeyPair: author })
+}
+
+// X once held epoch 1 from author O, then O rotated to epoch 2 without X.
+// Every option flips one clause of the revoked rule.
+const revokedFor = async ({
+  authorInRoster = true,
+  heldKey = true,
+  wrote = true,
+  inLatest = false,
+  myRow = null
+} = {}) => {
+  const X = await makePeer('X')
+  const O = makeKeyPair()
+  const e1 = '01'.repeat(16)
+  const e2 = '02'.repeat(16)
+  const k1 = generateEpochKey()
+  if (authorInRoster) await addDevice(X, rowFor('O', O))
+  if (myRow) await addDevice(X, myRow(X))
+  const records = [
+    epochBy(O, {
+      id: e1,
+      seq: 1,
+      ring: { [e1]: k1 },
+      to: heldKey
+        ? [
+            ['O', O],
+            ['X', X.keyPair]
+          ]
+        : [['O', O]]
+    }),
+    epochBy(O, {
+      id: e2,
+      seq: 2,
+      prev: e1,
+      ring: { [e1]: k1, [e2]: generateEpochKey() },
+      to: inLatest
+        ? [
+            ['O', O],
+            ['X', X.keyPair]
+          ]
+        : [['O', O]]
+    })
+  ]
+  for (const record of records) {
+    await X.instance.add(`epoch/${record.id}`, JSON.stringify(record))
+  }
+  if (!wrote) {
+    Object.defineProperty(X.instance.base.local, 'length', {
+      value: 0,
+      configurable: true
+    })
+  }
+  return (await X.store.status()).revoked
+}
 
 afterEach(async () => {
   for (const peer of peers.splice(0)) {
@@ -606,5 +675,17 @@ describe('epochStore over real Autopass', () => {
     await expect(store.refresh()).rejects.toThrow('key store busy')
     expect((await store.get('record/r')).value).toBe('v')
     expect((await store.status()).canRead).toBe(true)
+  })
+
+  it('reports revoked only when every clause of the rule holds', async () => {
+    expect(await revokedFor()).toBe(true)
+    // No accepted epoch: its only author left the roster.
+    expect(await revokedFor({ authorInRoster: false })).toBe(false)
+    expect(await revokedFor({ heldKey: false })).toBe(false)
+    expect(await revokedFor({ wrote: false })).toBe(false)
+    expect(await revokedFor({ inLatest: true })).toBe(false)
+    expect(await revokedFor({ myRow: (X) => rowFor('X', X.keyPair) })).toBe(
+      false
+    )
   })
 })
