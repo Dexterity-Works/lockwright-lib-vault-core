@@ -28,7 +28,7 @@ const rowFor = (id, keyPair, writerKey) => ({
   createdAt: Date.now()
 })
 
-const makePeer = async (id, host) => {
+const makePeer = async (id, host, keyPair = makeKeyPair()) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'epoch-store-'))
   const corestore = new Corestore(dir)
   const instance = new Autopass(
@@ -42,7 +42,6 @@ const makePeer = async (id, host) => {
       : { replicate: false }
   )
   await instance.ready()
-  const keyPair = makeKeyPair()
   const logger = { warn: jest.fn() }
   const store = createEpochStore({
     instance,
@@ -380,6 +379,9 @@ describe('epochStore over real Autopass', () => {
 
   it('reports revoked for a kicked device that held a key', async () => {
     const [A, B, C] = await setup()
+    // Like the app, C writes its own row.
+    await addDevice(C, C.row)
+    await sync(A, B, C)
     await A.store.ensureEpoch({ start: true })
     await sync(A, B, C)
     expect((await C.store.status()).canRead).toBe(true)
@@ -444,5 +446,33 @@ describe('epochStore over real Autopass', () => {
       rotated: false,
       reason: 'current'
     })
+  })
+
+  it('does not report revoked for a kicked device that pairs again', async () => {
+    const [A, B, L] = await setup(['A', 'B', 'L'])
+    await A.store.ensureEpoch({ start: true })
+    await sync(A, B, L)
+    await kick(A, L)
+    await sync(A, B)
+
+    // Fresh per-vault store, same personal key: it opens its old boxes.
+    const L2 = await makePeer('L', A, L.keyPair)
+    await A.instance.addWriter(L2.instance.writerKey)
+    await sync(A, B, L2)
+    expect(await L2.store.status()).toMatchObject({
+      canRead: false,
+      revoked: false
+    })
+
+    await addDevice(L2, L2.row)
+    await sync(A, B, L2)
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      members: ['A', 'B', 'L']
+    })
+    await A.store.add('record/back', 'v')
+    await sync(A, B, L2)
+    expect(await value(L2, 'record/back')).toBe('v')
+    expect((await L2.store.status()).canRead).toBe(true)
   })
 })
