@@ -126,6 +126,14 @@ const kick = async (host, target) => {
   return result
 }
 
+// An envelope under an epoch nobody holds.
+const UNREADABLE = JSON.stringify({
+  $enc: 1,
+  e: 'ff'.repeat(16),
+  n: 'AA==',
+  c: 'AA=='
+})
+
 const value = async (peer, key) => (await peer.store.get(key))?.value ?? null
 
 const rawEnvelope = async (peer, key) =>
@@ -698,14 +706,8 @@ describe('epochStore over real Autopass', () => {
   it('fills a find limit with readable rows, forwards and in reverse', async () => {
     const [A] = await setup(['A'])
     await A.store.ensureEpoch({ start: true })
-    const unreadable = JSON.stringify({
-      $enc: 1,
-      e: 'ff'.repeat(16),
-      n: 'AA==',
-      c: 'AA=='
-    })
     for (const n of [1, 3, 5]) await A.store.add(`record/${n}`, `v${n}`)
-    for (const n of [2, 4]) await A.instance.add(`record/${n}`, unreadable)
+    for (const n of [2, 4]) await A.instance.add(`record/${n}`, UNREADABLE)
     const range = { gte: { key: 'record/' }, lt: { key: 'record0' } }
     const keys = async (opts) =>
       (await A.store.find({ ...range, ...opts })).map((r) => r.key)
@@ -717,5 +719,29 @@ describe('epochStore over real Autopass', () => {
     ])
     expect(await keys({ limit: 0 })).toEqual([])
     expect(await keys({})).toEqual(['record/1', 'record/3', 'record/5'])
+  })
+
+  it('refreshes at most once per find while updates keep landing', async () => {
+    const [A] = await setup(['A'])
+    await A.store.ensureEpoch({ start: true })
+    for (const n of [1, 2, 3]) await A.instance.add(`record/${n}`, UNREADABLE)
+    let refreshes = 0
+    // Every refresh sees a new update land, so the view always looks stale.
+    const store = createEpochStore({
+      instance: A.instance,
+      getPersonalKeyPair: async () => {
+        refreshes++
+        A.instance.emit('update')
+        return A.keyPair
+      }
+    })
+    await store.status()
+
+    refreshes = 0
+    expect(
+      await store.find({ gte: { key: 'record/' }, lt: { key: 'record0' } })
+    ).toEqual([])
+    // One to catch up on entry, one retry for the unreadable rows.
+    expect(refreshes).toBeLessThanOrEqual(2)
   })
 })

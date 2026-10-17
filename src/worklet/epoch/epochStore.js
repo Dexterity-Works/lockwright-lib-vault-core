@@ -162,7 +162,9 @@ export const createEpochStore = ({
   const ensureFresh = () => (refreshedAt === updates ? refreshing : refresh())
 
   // Throws EpochKeyUnavailableError / EpochDecryptError for unreadable values.
-  const decodeRecord = async (key, record, retried = false) => {
+  // `pass` is shared by every row of one get or find call, so the call
+  // refreshes at most once however many rows it cannot read.
+  const decodeRecord = async (key, record, pass) => {
     if (isPlaintextKey(key) || !isEnvelope(record.value)) {
       return { value: record.value, file: record.file ?? null }
     }
@@ -170,20 +172,24 @@ export const createEpochStore = ({
       const out = decryptValue(record.value, ring, record.file || null)
       return { value: out.value, file: out.file ?? null }
     } catch (err) {
-      // Retry once only when the view moved since the last refresh, so a
-      // revoked device does not rescan per unreadable record.
+      // Retry only when the view moved since the last refresh.
       const stale = refreshedAt !== updates
-      if (retried || !stale || !(err instanceof EpochKeyUnavailableError)) {
+      if (
+        pass.retried ||
+        !stale ||
+        !(err instanceof EpochKeyUnavailableError)
+      ) {
         throw err
       }
+      pass.retried = true
       await refresh()
-      return decodeRecord(key, record, true)
+      return decodeRecord(key, record, pass)
     }
   }
 
-  const readOrNull = async (key, record) => {
+  const readOrNull = async (key, record, pass = { retried: false }) => {
     try {
-      return await decodeRecord(key, record)
+      return await decodeRecord(key, record, pass)
     } catch (err) {
       logOnce(key, 'epochStore: unreadable record', { error: err.name })
       return null
@@ -226,6 +232,7 @@ export const createEpochStore = ({
     // Unreadable rows do not count toward the limit, so read the view
     // unbounded and stop once enough rows decoded.
     const max = limit ?? Infinity
+    const pass = { retried: false }
     for await (const record of instance.base.view.find(RECORDS, {
       gte,
       lte,
@@ -234,7 +241,7 @@ export const createEpochStore = ({
       reverse
     })) {
       if (results.length >= max) break
-      const decoded = await readOrNull(record.key, record)
+      const decoded = await readOrNull(record.key, record, pass)
       if (decoded) results.push({ key: record.key, ...decoded })
     }
     return results
