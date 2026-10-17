@@ -73,76 +73,77 @@ jest.mock('autopass', () => {
   const mockAutopassUpdate = jest.fn().mockResolvedValue()
   globalThis.__mockAutopassUpdate = mockAutopassUpdate
 
-  const mockAutopass = jest.fn().mockImplementation(() => ({
-    ready: jest.fn().mockResolvedValue(),
-    close: jest.fn().mockResolvedValue(),
-    suspend: jest.fn().mockResolvedValue(),
-    resume: jest.fn().mockResolvedValue(),
-    add: jest.fn().mockResolvedValue(),
-    remove: jest.fn().mockResolvedValue(),
-    removeWriter: jest.fn().mockResolvedValue(),
-    get: jest.fn().mockResolvedValue({
-      value: JSON.stringify({ id: 'vault-id' }),
-      file: Buffer.from('test file content')
-    }),
-    createInvite: jest.fn().mockResolvedValue('invite-code'),
-    deleteInvite: jest.fn().mockResolvedValue(),
-    encryptionKey: {
-      toString: jest.fn().mockReturnValue('encryption-key')
-    },
-    list: jest.fn().mockResolvedValue({
-      on: (event, callback) => {
-        if (event === 'data') {
-          callback({ key: 'test1', value: 1 })
-          callback({ key: 'filter_test', value: 2 })
-          callback({ key: 'test2', value: 3 })
+  // A real EventEmitter, so 'update' reaches every listener the code adds.
+  const { EventEmitter } = jest.requireActual('events')
+  const mockAutopass = jest.fn().mockImplementation(() =>
+    Object.assign(new EventEmitter(), {
+      ready: jest.fn().mockResolvedValue(),
+      close: jest.fn().mockResolvedValue(),
+      suspend: jest.fn().mockResolvedValue(),
+      resume: jest.fn().mockResolvedValue(),
+      add: jest.fn().mockResolvedValue(),
+      remove: jest.fn().mockResolvedValue(),
+      removeWriter: jest.fn().mockResolvedValue(),
+      get: jest.fn().mockResolvedValue({
+        value: JSON.stringify({ id: 'vault-id' }),
+        file: Buffer.from('test file content')
+      }),
+      createInvite: jest.fn().mockResolvedValue('invite-code'),
+      deleteInvite: jest.fn().mockResolvedValue(),
+      encryptionKey: {
+        toString: jest.fn().mockReturnValue('encryption-key')
+      },
+      list: jest.fn().mockResolvedValue({
+        on: (event, callback) => {
+          if (event === 'data') {
+            callback({ key: 'test1', value: 1 })
+            callback({ key: 'filter_test', value: 2 })
+            callback({ key: 'test2', value: 3 })
+          }
+          if (event === 'end') {
+            callback()
+          }
         }
-        if (event === 'end') {
-          callback()
+      }),
+      pairInstance: jest.fn().mockResolvedValue(),
+      core: {
+        ready: jest.fn().mockResolvedValue()
+      },
+      base: {
+        update: (...args) => globalThis.__mockAutopassUpdate(...args),
+        view: {
+          flush: jest.fn().mockResolvedValue(),
+          find: jest.fn().mockReturnValue({
+            async *[Symbol.asyncIterator]() {}
+          })
+        },
+        local: {
+          keyPair: mockMakeKeyPairFromSeed(Buffer.alloc(32, 0x11)),
+          userData: new Map(),
+          async getUserData(key) {
+            return this.userData.get(key) ?? null
+          },
+          async setUserData(key, value) {
+            this.userData.set(key, value)
+          }
         }
-      }
-    }),
-    removeAllListeners: jest.fn(),
-    removeListener: jest.fn(),
-    on: jest.fn(),
-    pairInstance: jest.fn().mockResolvedValue(),
-    core: {
-      ready: jest.fn().mockResolvedValue()
-    },
-    base: {
-      update: (...args) => globalThis.__mockAutopassUpdate(...args),
-      view: {
-        flush: jest.fn().mockResolvedValue(),
-        find: jest.fn().mockReturnValue({
-          async *[Symbol.asyncIterator]() {}
+      },
+      store: {
+        createKeyPair: jest.fn(async (name) => {
+          const seed = Buffer.alloc(32)
+          Buffer.from(`mock-store:${name}`).copy(seed)
+          return mockMakeKeyPairFromSeed(seed)
         })
       },
-      local: {
-        keyPair: mockMakeKeyPairFromSeed(Buffer.alloc(32, 0x11)),
-        userData: new Map(),
-        async getUserData(key) {
-          return this.userData.get(key) ?? null
-        },
-        async setUserData(key, value) {
-          this.userData.set(key, value)
-        }
-      }
-    },
-    store: {
-      createKeyPair: jest.fn(async (name) => {
-        const seed = Buffer.alloc(32)
-        Buffer.from(`mock-store:${name}`).copy(seed)
-        return mockMakeKeyPairFromSeed(seed)
-      })
-    },
-    writerKey: Buffer.from(
-      'aabbccddeeff0011223344556677889900aabbccddeeff00112233445566778899',
-      'hex'
-    ),
-    getMirror: jest.fn().mockResolvedValue([]),
-    addMirror: jest.fn().mockResolvedValue(),
-    removeMirror: jest.fn().mockResolvedValue()
-  }))
+      writerKey: Buffer.from(
+        'aabbccddeeff0011223344556677889900aabbccddeeff00112233445566778899',
+        'hex'
+      ),
+      getMirror: jest.fn().mockResolvedValue([]),
+      addMirror: jest.fn().mockResolvedValue(),
+      removeMirror: jest.fn().mockResolvedValue()
+    })
+  )
 
   mockAutopass.pair = jest.fn().mockReturnValue(mockPair)
 
@@ -1183,12 +1184,9 @@ describe('appDeps module functions (excluding encryption)', () => {
       const instance = appDeps.getActiveVaultInstance()
       const onUpdate = jest.fn()
       await appDeps.initListener({ vaultId: 'vault1', onUpdate })
-      const updateListener = instance.on.mock.calls
-        .filter(([event]) => event === 'update')
-        .at(-1)[1]
       const fireUpdate = async () => {
         const before = onUpdate.mock.calls.length
-        updateListener()
+        instance.emit('update')
         await waitFor(() => onUpdate.mock.calls.length > before)
         await new Promise((resolve) => setTimeout(resolve, 50))
       }
