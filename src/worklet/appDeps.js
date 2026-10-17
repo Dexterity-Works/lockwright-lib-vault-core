@@ -480,8 +480,11 @@ const runEpochSync = async ({ ensure }) => {
       uncovered
     })
     if (store !== epochStore || json === lastEpochStatusJson) return
+    if (!epochStatusListener) return
+    // Recorded only once delivered, so a missing or failing listener gets
+    // the same status on the next update.
+    epochStatusListener(status)
     lastEpochStatusJson = json
-    epochStatusListener?.(status)
   } catch (error) {
     workletLogger.error('epoch sync failed', error)
   }

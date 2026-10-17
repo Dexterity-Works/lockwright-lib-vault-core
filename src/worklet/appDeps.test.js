@@ -1218,6 +1218,27 @@ describe('appDeps module functions (excluding encryption)', () => {
       expect(pushes[1]).toMatchObject({ seq: 2, members: ['me', 'other'] })
     })
 
+    test('the update listener pushes again when no listener got the status yet', async () => {
+      const fireUpdate = await listen()
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      await fireUpdate()
+
+      const pushes = []
+      let fail = true
+      appDeps.setEpochStatusListener((status) => {
+        if (fail) {
+          fail = false
+          throw new Error('client gone')
+        }
+        pushes.push(status)
+      })
+      await fireUpdate()
+      expect(pushes).toHaveLength(0)
+      await fireUpdate()
+      expect(pushes).toHaveLength(1)
+      expect(pushes[0]).toMatchObject({ vaultId: 'vault1', members: ['me'] })
+    })
+
     describe('incremental reconcile', () => {
       const v1 = { id: 'r1', type: 'note', data: { title: 'kept' } }
       const unreadable = JSON.stringify({
