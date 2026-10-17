@@ -89,7 +89,14 @@ export const createEpochStore = ({
   const readRoster = async () =>
     (await readPrefix('device/'))
       .filter(({ value }) => value && typeof value === 'object')
-      .map(({ key, value }) => ({ ...value, id: value.id ?? key.slice(7) }))
+      .map(({ key, value }) => ({
+        ...value,
+        id: value.id ?? key.slice(7),
+        // Anything but a usable key string counts as no masterTopic.
+        masterTopic: canSealTo(value.masterTopic)
+          ? value.masterTopic
+          : undefined
+      }))
 
   const doRefresh = async () => {
     const startedAt = updates
@@ -223,7 +230,8 @@ export const createEpochStore = ({
   }
 
   const isMe = (masterTopic, keyPair) =>
-    masterTopic?.toLowerCase() === keyPair.publicKey.toString('hex')
+    typeof masterTopic === 'string' &&
+    masterTopic.toLowerCase() === keyPair.publicKey.toString('hex')
 
   const rotate = async (sealable, uncovered, keyPair) => {
     const { latest } = epochs

@@ -491,4 +491,22 @@ describe('epochStore over real Autopass', () => {
       reason: 'current'
     })
   })
+
+  it('keeps working with a roster row whose masterTopic is a number', async () => {
+    const [A] = await setup(['A'])
+    // device/0 sorts before device/A, so every roster scan meets it first.
+    await addDevice(A, { id: '0', masterTopic: 12345 })
+    await A.store.ensureEpoch({ start: true })
+    await A.store.add('record/n', 'v')
+
+    expect(await value(A, 'record/n')).toBe('v')
+    expect(
+      await A.store.find({ gte: { key: 'record/' }, lt: { key: 'record0' } })
+    ).toHaveLength(1)
+    expect(await A.store.status()).toMatchObject({
+      canRead: true,
+      revoked: false,
+      uncovered: ['0']
+    })
+  })
 })

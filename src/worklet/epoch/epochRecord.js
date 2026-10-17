@@ -90,10 +90,13 @@ const isWellFormed = (record) =>
  * @returns {boolean}
  */
 export const verifyEpochRecord = (record, roster) => {
-  if (!isWellFormed(record)) return false
-  if (!roster.some((row) => row?.masterTopic?.toLowerCase() === record.by)) {
-    return false
-  }
+  if (!isWellFormed(record) || !Array.isArray(roster)) return false
+  const authorInRoster = roster.some(
+    (row) =>
+      typeof row?.masterTopic === 'string' &&
+      row.masterTopic.toLowerCase() === record.by
+  )
+  if (!authorInRoster) return false
   try {
     return sodium.crypto_sign_verify_detached(
       Buffer.from(record.sig, 'hex'),

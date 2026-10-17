@@ -79,4 +79,13 @@ describe('epochRecord', () => {
     expect(latest).toBe(twoHigh)
     expect(resolveEpochs([], roster).latest).toBeNull()
   })
+
+  it('skips roster rows whose masterTopic is not a string', () => {
+    const record = build()
+    const odd = [{ masterTopic: 5 }, { masterTopic: {} }, null, ...roster]
+
+    expect(verifyEpochRecord(record, odd)).toBe(true)
+    expect(verifyEpochRecord(record, null)).toBe(false)
+    expect(resolveEpochs([record], odd).latest).toBe(record)
+  })
 })
