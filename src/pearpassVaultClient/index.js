@@ -8,6 +8,25 @@ import { receiveFileStream } from '../utils/recieveFileStream.js'
 import { sendFileStream } from '../utils/sendFileStream.js'
 import { API, API_BY_VALUE } from '../worklet/api.js'
 
+/**
+ * Epoch status of the active vault, returned by activeVaultGetEpochStatus
+ * and pushed as the payload of the 'epoch-status' event.
+ * @typedef {{
+ *   vaultId: string | null,
+ *   epoch: string | null,
+ *   seq: number,
+ *   legacy: boolean,
+ *   canRead: boolean,
+ *   revoked: boolean,
+ *   members: string[],
+ *   uncovered: string[]
+ * }} EpochStatus
+ */
+
+/**
+ * @fires PearpassVaultClient#epoch-status with an EpochStatus whenever the
+ *   active vault's epoch status changes.
+ */
 export class PearpassVaultClient extends EventEmitter {
   /**
    * @param {*} ipc - bare-rpc compatible IPC stream
@@ -541,8 +560,9 @@ export class PearpassVaultClient extends EventEmitter {
   }
 
   /**
-   * The active vault's epoch status. Also pushed as the 'epoch-status' event.
-   * @returns {Promise<{ epoch: string | null, seq: number, legacy: boolean, canRead: boolean, revoked: boolean, members: string[], uncovered: string[] }>}
+   * The active vault's epoch status. The same object is pushed as the
+   * 'epoch-status' event when it changes.
+   * @returns {Promise<EpochStatus>}
    */
   async activeVaultGetEpochStatus() {
     return this._handleRequest({
