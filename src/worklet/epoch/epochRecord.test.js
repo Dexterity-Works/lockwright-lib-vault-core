@@ -3,7 +3,6 @@ import sodium from 'sodium-native'
 import {
   buildEpochRecord,
   resolveEpochs,
-  verifyEpochRecord,
   verifySignature
 } from './epochRecord.js'
 
@@ -43,7 +42,8 @@ describe('epochRecord', () => {
     expect(record.id).toMatch(/^[0-9a-f]{32}$/)
     expect(record.by).toBe(a.publicKey.toString('hex'))
     expect(Object.keys(record.members)).toEqual(['A', 'B'])
-    expect(verifyEpochRecord(record, roster)).toBe(true)
+    expect(verifySignature(record)).toBe(true)
+    expect(resolveEpochs([at(record)], roster).latest).toBe(record)
   })
 
   it('fails when any canonical field changes', () => {
@@ -61,15 +61,15 @@ describe('epochRecord', () => {
     ]
 
     for (const edit of edits) {
-      expect(verifyEpochRecord({ ...record, ...edit }, roster)).toBe(false)
+      expect(verifySignature({ ...record, ...edit })).toBe(false)
     }
   })
 
   it('fails when the author is not in the roster', () => {
     const record = build({ personalKeyPair: outsider })
 
-    expect(verifyEpochRecord(record, roster)).toBe(false)
-    expect(verifyEpochRecord(build(), [{ id: 'A' }])).toBe(false)
+    expect(resolveEpochs([at(record)], roster).latest).toBeNull()
+    expect(resolveEpochs([at(build())], [{ id: 'A' }]).latest).toBeNull()
   })
 
   it('resolves the highest seq with an id tie-break and drops invalid records', () => {
@@ -98,9 +98,8 @@ describe('epochRecord', () => {
     const record = build()
     const odd = [{ masterTopic: 5 }, { masterTopic: {} }, null, ...roster]
 
-    expect(verifyEpochRecord(record, odd)).toBe(true)
-    expect(verifyEpochRecord(record, null)).toBe(false)
     expect(resolveEpochs([at(record)], odd).latest).toBe(record)
+    expect(resolveEpochs([at(record)], null).latest).toBeNull()
   })
 
   it('ignores a record stored under another epoch key', () => {
@@ -162,7 +161,6 @@ describe('epochRecord', () => {
 
     for (const bad of [...signed, ...edited]) {
       expect(verifySignature(bad)).toBe(false)
-      expect(verifyEpochRecord(bad, roster)).toBe(false)
       expect(resolveEpochs([at(bad)], roster).signed).toEqual([])
     }
     expect(verifySignature(record)).toBe(true)

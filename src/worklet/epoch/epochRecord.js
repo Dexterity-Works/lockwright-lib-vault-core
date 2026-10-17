@@ -157,16 +157,6 @@ const rosterTopics = (roster) =>
         .map((topic) => topic.toLowerCase())
     : []
 
-/**
- * Valid when signed and `by` is the masterTopic of a roster row.
- *
- * @param {object} record
- * @param {Array<{ masterTopic?: string }>} roster
- * @returns {boolean}
- */
-export const verifyEpochRecord = (record, roster) =>
-  verifySignature(record) && rosterTopics(roster).includes(record.by)
-
 const compare = (a, b) =>
   a.seq - b.seq || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
 
