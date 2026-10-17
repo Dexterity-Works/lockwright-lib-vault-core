@@ -1332,6 +1332,29 @@ describe('appDeps module functions (excluding encryption)', () => {
       })
     })
 
+    test('drops a status computed for a vault that closed meanwhile', async () => {
+      const { local } = appDeps.getActiveVaultInstance().base
+      const { getUserData } = local
+      let release
+      const gate = new Promise((resolve) => {
+        release = resolve
+      })
+      // The rotation the update starts waits here until the vault closed.
+      local.getUserData = async function (key) {
+        await gate
+        return getUserData.call(this, key)
+      }
+      const pushes = []
+      appDeps.setEpochStatusListener((status) => pushes.push(status))
+      const fireUpdate = await listen()
+      await fireUpdate()
+
+      await appDeps.closeActiveVaultInstance()
+      release()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(pushes).toEqual([])
+    })
+
     test('the update listener pushes again when no listener got the status yet', async () => {
       const fireUpdate = await listen()
       await appDeps.activeVaultEnsureEpoch({ start: true })
