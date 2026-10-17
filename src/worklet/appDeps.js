@@ -486,10 +486,16 @@ const scheduleIncrementalReconcile = (after) => {
 const runEpochSync = async ({ ensure }) => {
   const store = epochStore
   if (!store) return
-  try {
-    if (ensure && activeVaultInstance?.base?.writable) {
+  // A failed rotation still leaves a status worth pushing: revoked or
+  // uncovered devices must not wait for the next rotation that works.
+  if (ensure && activeVaultInstance?.base?.writable) {
+    try {
       await store.ensureEpoch({ start: false })
+    } catch (error) {
+      workletLogger.error('epoch rotation failed', error)
     }
+  }
+  try {
     const status = await store.status()
     const {
       vaultId,

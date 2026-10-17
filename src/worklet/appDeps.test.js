@@ -1275,6 +1275,29 @@ describe('appDeps module functions (excluding encryption)', () => {
       expect(pushes[1]).toMatchObject({ seq: 2, members: ['me', 'other'] })
     })
 
+    test('the update listener pushes the status when the rotation fails', async () => {
+      const pushes = []
+      appDeps.setEpochStatusListener((status) => pushes.push(status))
+      const fireUpdate = await listen()
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      const instance = appDeps.getActiveVaultInstance()
+      const add = instance.add
+      instance.add = jest.fn(async (key, ...rest) => {
+        if (key.startsWith('epoch/')) throw new Error('disk full')
+        return add(key, ...rest)
+      })
+      vault.put('device/legacy', JSON.stringify({ id: 'legacy' }))
+      vault.put('device/other', deviceRow('other', makeSignKeyPair()))
+      await fireUpdate()
+
+      expect(pushes).toHaveLength(1)
+      expect(pushes[0]).toMatchObject({
+        vaultId: 'vault1',
+        members: ['me'],
+        uncovered: ['legacy']
+      })
+    })
+
     test('the update listener pushes again when no listener got the status yet', async () => {
       const fireUpdate = await listen()
       await appDeps.activeVaultEnsureEpoch({ start: true })
