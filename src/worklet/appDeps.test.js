@@ -270,6 +270,7 @@ import bareFs from 'bare-fs'
 
 import * as appDeps from './appDeps'
 import { buildEpochRecord, generateEpochId } from './epoch/epochRecord'
+import { isPlaintextKey } from './epoch/epochStore'
 import { generateEpochKey, sealRing } from './epoch/keyring'
 
 const mockSodium = require('sodium-native')
@@ -1237,6 +1238,103 @@ describe('appDeps module functions (excluding encryption)', () => {
       await fireUpdate()
       expect(pushes).toHaveLength(1)
       expect(pushes[0]).toMatchObject({ vaultId: 'vault1', members: ['me'] })
+    })
+
+    describe('record routing under an epoch', () => {
+      const secrets = ['hunter2-secret', 'note-secret', 'JBSWY3DPEHPK3PXP']
+      const fileBytes = 'attachment-secret'
+
+      // Every row outside the plaintext keys is an envelope, and no secret
+      // shows in any stored value or file.
+      const expectSealed = () => {
+        for (const [key, { value, file }] of vault.rows) {
+          if (!isPlaintextKey(key)) {
+            expect({ key, enc: JSON.parse(value).$enc }).toEqual({
+              key,
+              enc: 1
+            })
+          }
+          for (const secret of secrets) expect(value).not.toContain(secret)
+          if (file) expect(file.toString()).not.toContain(fileBytes)
+        }
+      }
+
+      beforeEach(async () => {
+        await appDeps.activeVaultEnsureEpoch({ start: true })
+      })
+
+      test('v1 and v2 record writes and their projections are sealed', async () => {
+        await appDeps.activeVaultAdd('record/r1', {
+          id: 'r1',
+          type: 'login',
+          data: { title: 'Bank', password: 'hunter2-secret', websites: [] }
+        })
+        await appDeps.activeVaultAdd('record-v2/r2', {
+          id: 'r2',
+          type: 'note',
+          schema: 2,
+          data: { title: 'Note', note: 'note-secret' }
+        })
+        await appDeps.activeVaultAdd(
+          'record/r1/file/f1',
+          { name: 'a.txt' },
+          Buffer.from(fileBytes)
+        )
+
+        expect(
+          [...vault.rows.keys()].filter((k) => k.startsWith('record'))
+        ).toEqual(
+          expect.arrayContaining([
+            'record/r1',
+            'record-v2/r1',
+            'record/r2',
+            'record-v2/r2',
+            'record/r1/file/f1',
+            'record-v2/r1/file/f1'
+          ])
+        )
+        expectSealed()
+      })
+
+      test('record reads, raw reads, and OTP edits go through the store', async () => {
+        await appDeps.activeVaultAdd('record/r1', {
+          id: 'r1',
+          type: 'login',
+          data: { title: 'Bank', password: 'hunter2-secret', websites: [] }
+        })
+
+        expect(await appDeps.activeVaultGet('record/r1')).toMatchObject({
+          data: { password: 'hunter2-secret' }
+        })
+        await appDeps.addOtpToRecord('r1', 'JBSWY3DPEHPK3PXP')
+        expectSealed()
+
+        const [code] = await appDeps.generateOtpCodesByIds(['r1'])
+        expect(code).toMatchObject({ recordId: 'r1' })
+        expect(code.code).toMatch(/^\d{6}$/)
+        expect(await appDeps.activeVaultGet('record-v2/r1')).toMatchObject({
+          data: { password: 'hunter2-secret' },
+          otpPublic: { type: 'TOTP' }
+        })
+        await appDeps.removeOtpFromRecord('r1')
+        expectSealed()
+      })
+
+      test('the reconcile copies a sealed v1 file through the store', async () => {
+        const fireUpdate = await listen()
+        await appDeps.activeVaultAdd(
+          'record/r1/file/f1',
+          { name: 'a.txt' },
+          Buffer.from(fileBytes)
+        )
+        vault.rows.delete('record-v2/r1/file/f1')
+        await fireUpdate()
+
+        expect(
+          await appDeps.activeVaultGetFile('record-v2/r1/file/f1')
+        ).toEqual(Buffer.from(fileBytes))
+        expectSealed()
+      })
     })
 
     describe('incremental reconcile', () => {
