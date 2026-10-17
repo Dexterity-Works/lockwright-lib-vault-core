@@ -155,8 +155,9 @@ export const createEpochStore = ({
     const records = await readPrefix('epoch/')
     const next = resolveEpochs(records, nextRoster, { verify: verifyOnce })
 
+    const valid = new Set(next.valid)
     for (const { key, value } of records) {
-      if (!next.valid.includes(value)) {
+      if (!valid.has(value)) {
         logOnce(key, 'epochStore: ignoring invalid epoch record')
       }
     }
