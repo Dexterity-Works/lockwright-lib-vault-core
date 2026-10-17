@@ -271,7 +271,7 @@ import bareFs from 'bare-fs'
 import * as appDeps from './appDeps'
 import { buildEpochRecord, generateEpochId } from './epoch/epochRecord'
 import { isPlaintextKey } from './epoch/epochStore'
-import { generateEpochKey, sealRing } from './epoch/keyring'
+import { generateEpochKey, sealCheck, sealRing } from './epoch/keyring'
 
 const mockSodium = require('sodium-native')
 
@@ -1108,7 +1108,8 @@ describe('appDeps module functions (excluding encryption)', () => {
       const topic = other.publicKey.toString('hex')
       vault.put('device/other', deviceRow('other', other))
       const id = generateEpochId()
-      const box = sealRing({ [id]: generateEpochKey() }, [
+      const key = generateEpochKey()
+      const box = sealRing({ [id]: key }, [
         { id: 'other', masterTopic: topic }
       ]).other
       const record = buildEpochRecord({
@@ -1116,6 +1117,7 @@ describe('appDeps module functions (excluding encryption)', () => {
         seq,
         prev: null,
         members: { other: { topic, box } },
+        check: sealCheck(key),
         personalKeyPair: other
       })
       vault.put(`epoch/${id}`, JSON.stringify(record))

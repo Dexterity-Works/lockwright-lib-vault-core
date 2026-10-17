@@ -6,9 +6,7 @@ const isHex = (value, length) =>
   value.length === length &&
   /^[0-9a-f]+$/.test(value)
 
-// v2: each member carries the topic its box is sealed to, so authorship can
-// be traced through epochs after the author left the roster.
-const VERSION = 2
+const VERSION = 1
 
 const sortMembers = (members) =>
   Object.fromEntries(
@@ -17,7 +15,7 @@ const sortMembers = (members) =>
       .map((id) => [id, { topic: members[id].topic, box: members[id].box }])
   )
 
-const canonicalBytes = ({ v, id, seq, prev, createdAt, by, members }) =>
+const canonicalBytes = ({ v, id, seq, prev, createdAt, by, members, check }) =>
   Buffer.from(
     JSON.stringify({
       v,
@@ -26,7 +24,8 @@ const canonicalBytes = ({ v, id, seq, prev, createdAt, by, members }) =>
       prev,
       createdAt,
       by,
-      members: sortMembers(members)
+      members: sortMembers(members),
+      check: { n: check.n, c: check.c }
     })
   )
 
@@ -45,6 +44,7 @@ export const generateEpochId = () => {
  *   seq: number
  *   prev: string | null
  *   members: Record<string, { topic: string, box: string }>
+ *   check: { n: string, c: string }
  *   personalKeyPair: { publicKey: Buffer, secretKey: Buffer }
  *   createdAt?: number
  * }} opts
@@ -54,6 +54,7 @@ export const buildEpochRecord = ({
   seq,
   prev,
   members,
+  check,
   personalKeyPair,
   createdAt = Date.now()
 }) => {
@@ -64,7 +65,8 @@ export const buildEpochRecord = ({
     prev,
     createdAt,
     by: personalKeyPair.publicKey.toString('hex'),
-    members: sortMembers(members)
+    members: sortMembers(members),
+    check: { n: check.n, c: check.c }
   }
   const sig = Buffer.alloc(sodium.crypto_sign_BYTES)
   sodium.crypto_sign_detached(
@@ -84,9 +86,11 @@ const RECORD_FIELDS = [
   'createdAt',
   'by',
   'members',
+  'check',
   'sig'
 ]
 const MEMBER_FIELDS = ['topic', 'box']
+const CHECK_FIELDS = ['n', 'c']
 
 const hasOnly = (object, fields) =>
   Object.keys(object).every((field) => fields.includes(field))
@@ -97,6 +101,15 @@ const isMember = (member) =>
   hasOnly(member, MEMBER_FIELDS) &&
   isHex(member.topic, 64) &&
   typeof member.box === 'string'
+
+const isObject = (value) =>
+  !!value && typeof value === 'object' && !Array.isArray(value)
+
+const isCheck = (check) =>
+  isObject(check) &&
+  hasOnly(check, CHECK_FIELDS) &&
+  typeof check.n === 'string' &&
+  typeof check.c === 'string'
 
 const isWellFormed = (record) =>
   !!record &&
@@ -113,6 +126,7 @@ const isWellFormed = (record) =>
   typeof record.members === 'object' &&
   !Array.isArray(record.members) &&
   Object.values(record.members).every(isMember) &&
+  isCheck(record.check) &&
   isHex(record.sig, 128)
 
 /**

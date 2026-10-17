@@ -13,6 +13,8 @@ import {
   generateEpochKey,
   isEnvelope,
   openRing,
+  opensCheck,
+  sealCheck,
   sealRing
 } from './keyring.js'
 
@@ -64,7 +66,10 @@ export const createEpochStore = ({
 }) => {
   let roster = []
   let epochs = { signed: [], valid: [], latest: null, highSeq: 0 }
-  const ring = Object.create(null)
+  // epochId -> key b64, only keys that open their record's check.
+  let ring = Object.create(null)
+  // epochId -> every key b64 an opened box offered for it.
+  const offered = new Map()
   const openedRecords = new Set()
   const loggedKeys = new Set()
   let updates = 0
@@ -103,6 +108,11 @@ export const createEpochStore = ({
     return rows
   }
 
+  const offer = (epochId, key) => {
+    if (!offered.has(epochId)) offered.set(epochId, new Set())
+    offered.get(epochId).add(key)
+  }
+
   const readRoster = async () =>
     (await readPrefix('device/'))
       .filter(({ value }) => value && typeof value === 'object')
@@ -128,8 +138,8 @@ export const createEpochStore = ({
       }
     }
 
-    // Any signed record may hold a box for me, even one whose author is no
-    // longer trusted: opening it never hurts.
+    // Any signed record may hold a box for me, whoever wrote it: a key it
+    // offers counts only once it opens the check of the epoch it names.
     const myTopic = keyPair.publicKey.toString('hex')
     for (const record of next.signed) {
       const cacheKey = `${record.id}:${record.sig}`
@@ -139,13 +149,21 @@ export const createEpochStore = ({
         if (topic !== myTopic) continue
         const opened = openRing(box, keyPair)
         if (!opened) continue
-        for (const [epochId, key] of Object.entries(opened)) {
-          if (!(epochId in ring)) ring[epochId] = key
-        }
+        for (const [epochId, key] of Object.entries(opened)) offer(epochId, key)
         break
       }
     }
+    const nextRing = Object.create(null)
+    for (const record of next.signed) {
+      for (const key of offered.get(record.id) ?? []) {
+        if (opensCheck(record.check, key)) {
+          nextRing[record.id] = key
+          break
+        }
+      }
+    }
 
+    ring = nextRing
     roster = nextRoster
     epochs = next
     refreshedAt = startedAt
@@ -337,10 +355,11 @@ export const createEpochStore = ({
       seq: highSeq + 1,
       prev: latest ? latest.id : null,
       members,
+      check: sealCheck(key),
       personalKeyPair: keyPair
     })
+    offer(id, key)
     await instance.add(`epoch/${id}`, JSON.stringify(record))
-    ring[id] = key
     await refresh()
     return {
       rotated: true,

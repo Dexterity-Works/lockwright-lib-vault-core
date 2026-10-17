@@ -12,6 +12,7 @@ import {
   EpochKeyUnavailableError,
   EpochRecordWriteError,
   generateEpochKey,
+  sealCheck,
   sealRing
 } from './keyring.js'
 
@@ -145,6 +146,7 @@ const rawEnvelope = async (peer, key) =>
   JSON.parse((await peer.instance.get(key)).value)
 
 // An epoch record by `author`, sealing `ring` to each [deviceId, keyPair].
+// `ring[id]` is the epoch's own key.
 const epochBy = (author, { id, seq, prev = null, ring, to }) => {
   const rows = to.map(([deviceId, kp]) => ({
     id: deviceId,
@@ -157,7 +159,14 @@ const epochBy = (author, { id, seq, prev = null, ring, to }) => {
       { topic: masterTopic, box: boxes[deviceId] }
     ])
   )
-  return buildEpochRecord({ id, seq, prev, members, personalKeyPair: author })
+  return buildEpochRecord({
+    id,
+    seq,
+    prev,
+    members,
+    check: sealCheck(ring[id]),
+    personalKeyPair: author
+  })
 }
 
 // X once held epoch 1 from author O, then O rotated to epoch 2 without X.
@@ -325,6 +334,7 @@ describe('epochStore over real Autopass', () => {
       seq: 99,
       prev: second.id,
       members: {},
+      check: sealCheck(generateEpochKey()),
       personalKeyPair: makeKeyPair()
     })
     await A.instance.add(`epoch/${forged.id}`, JSON.stringify(forged))
@@ -333,6 +343,7 @@ describe('epochStore over real Autopass', () => {
         seq: 3,
         prev: second.id,
         members: {},
+        check: sealCheck(generateEpochKey()),
         personalKeyPair: A.keyPair
       }),
       seq: 100
@@ -344,6 +355,30 @@ describe('epochStore over real Autopass', () => {
     expect((await rawEnvelope(A, 'record/z')).e).toBe(second.id)
     expect((await A.store.status()).seq).toBe(2)
     expect((await B.store.status()).epoch).toBe(second.id)
+  })
+
+  it('drops a key a foreign box offers for a real epoch', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    const real = await A.store.ensureEpoch({ start: true })
+    await A.store.add('record/x', 'v')
+
+    // A throwaway key signs a valid record of its own, sorted first so its
+    // box is opened first, mapping the real epoch to a key it chose.
+    const planted = '00'.repeat(16)
+    const record = epochBy(makeKeyPair(), {
+      id: planted,
+      seq: 1,
+      ring: { [planted]: generateEpochKey(), [real.id]: generateEpochKey() },
+      to: [['B', B.keyPair]]
+    })
+    await A.instance.add(`epoch/${planted}`, JSON.stringify(record))
+    await sync(A, B)
+
+    expect(await value(B, 'record/x')).toBe('v')
+    await B.store.add('record/y', 'w')
+    expect((await rawEnvelope(B, 'record/y')).e).toBe(real.id)
+    await sync(A, B)
+    expect(await value(A, 'record/y')).toBe('w')
   })
 
   it('omits an envelope whose epoch id was edited', async () => {

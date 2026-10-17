@@ -26,11 +26,13 @@ describe('epochRecord', () => {
     B: { topic: hex(b), box: 'sealed-b' },
     A: { topic: hex(a), box: 'sealed-a' }
   }
+  const check = { n: 'bm9uY2U=', c: 'Y2lwaGVy' }
   const build = (opts) =>
     buildEpochRecord({
       seq: 1,
       prev: null,
       members,
+      check,
       personalKeyPair: a,
       ...opts
     })
@@ -53,7 +55,9 @@ describe('epochRecord', () => {
       { createdAt: record.createdAt + 1 },
       { members: { ...record.members, C: { topic: hex(b), box: 'c' } } },
       { members: { ...record.members, A: { topic: hex(a), box: 'other' } } },
-      { members: { ...record.members, A: { topic: hex(b), box: 'sealed-a' } } }
+      { members: { ...record.members, A: { topic: hex(b), box: 'sealed-a' } } },
+      { check: { ...check, c: 'b3RoZXI=' } },
+      { check: { ...check, n: 'b3RoZXI=' } }
     ]
 
     for (const edit of edits) {
@@ -137,11 +141,15 @@ describe('epochRecord', () => {
       build({ createdAt: '1' }),
       build({ members: { A: { topic: [topic], box: 'x' } } }),
       build({ members: { A: { topic, box: 7 } } }),
-      build({ members: { A: { topic: 'zz'.repeat(32), box: 'x' } } })
+      build({ members: { A: { topic: 'zz'.repeat(32), box: 'x' } } }),
+      build({ check: { n: 1, c: 'x' } }),
+      build({ check: { n: 'x', c: ['x'] } })
     ]
     const record = build({ id })
     const edited = [
-      { ...record, v: 1 },
+      { ...record, v: 2 },
+      { ...record, check: undefined },
+      { ...record, check: { ...record.check, x: 'y' } },
       { ...record, by: [record.by] },
       { ...record, by: 'zz'.repeat(32) },
       { ...record, sig: [record.sig] },

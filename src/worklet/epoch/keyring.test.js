@@ -9,6 +9,8 @@ import {
   generateEpochKey,
   isEnvelope,
   openRing,
+  opensCheck,
+  sealCheck,
   sealRing
 } from './keyring.js'
 
@@ -211,6 +213,21 @@ describe('keyring', () => {
     expect(() => decryptValue(plain, { e1: 42 })).toThrow(
       EpochKeyUnavailableError
     )
+  })
+
+  it('opens a check only with the key it was sealed under', () => {
+    const check = sealCheck(ring.e1)
+
+    expect(opensCheck(check, ring.e1)).toBe(true)
+    expect(opensCheck(check, ring.e2)).toBe(false)
+    expect(opensCheck({ ...check, n: sealCheck(ring.e1).n }, ring.e1)).toBe(
+      false
+    )
+    expect(opensCheck(check, 'AAAA')).toBe(false)
+    expect(opensCheck(null, ring.e1)).toBe(false)
+    // A box sealed under the key but holding anything else is no check.
+    const other = JSON.parse(encryptValue('e1', ring.e1, 'not it').envelope)
+    expect(opensCheck({ n: other.n, c: other.c }, ring.e1)).toBe(false)
   })
 
   it('opens no ring from a box that is not a sealed key map', () => {

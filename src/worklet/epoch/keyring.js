@@ -306,3 +306,41 @@ export const decryptValue = (envelope, ring, fileBuffer) => {
     if (plain) free(plain)
   }
 }
+
+/** Plaintext of every epoch record's `check`. */
+export const EPOCH_CHECK_CONSTANT = 'lockwright/epoch-check/v1'
+
+/**
+ * Key commitment for an epoch record: the constant sealed under its key.
+ * @param {string} keyB64
+ * @returns {{ n: string, c: string }}
+ */
+export const sealCheck = (keyB64) => {
+  const key = readKey(keyB64)
+  try {
+    const { nonce, ciphertext } = seal(Buffer.from(EPOCH_CHECK_CONSTANT), key)
+    return { n: nonce.toString('base64'), c: ciphertext.toString('base64') }
+  } finally {
+    free(key)
+  }
+}
+
+/**
+ * @param {{ n: string, c: string }} check
+ * @param {unknown} keyB64
+ * @returns {boolean} whether keyB64 is the key the check was sealed under
+ */
+export const opensCheck = (check, keyB64) => {
+  if (!isEpochKey(keyB64) || typeof check?.c !== 'string') return false
+  const key = readKey(keyB64)
+  let plain = null
+  try {
+    plain = open(Buffer.from(check.c, 'base64'), check.n, key)
+    return plain.toString('utf8') === EPOCH_CHECK_CONSTANT
+  } catch {
+    return false
+  } finally {
+    free(key)
+    if (plain) free(plain)
+  }
+}
