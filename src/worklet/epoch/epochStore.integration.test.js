@@ -1023,6 +1023,16 @@ describe('epochStore over real Autopass', () => {
     })
   })
 
+  it('leaves plaintext mode for an unparsable epoch row alone', async () => {
+    const [A] = await setup(['A'])
+    await A.instance.add('epoch/x', 'not json')
+
+    expect(await A.store.status()).toMatchObject({ legacy: false, epoch: null })
+    await A.store.add('record/r', 'v')
+    expect((await rawEnvelope(A, 'record/r')).$enc).toBe(1)
+    expect(await value(A, 'record/r')).toBe('v')
+  })
+
   it('refuses add and remove on epoch keys', async () => {
     const [A] = await setup(['A'])
     const { id } = await A.store.ensureEpoch({ start: true })
