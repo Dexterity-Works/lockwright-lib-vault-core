@@ -85,6 +85,9 @@ export const createEpochStore = ({
   // `${key}:${sig}` -> { raw, ok }. The raw value is part of the hit, so a
   // row rewritten under the same key with a copied sig is verified again.
   const verified = new Map()
+  // `${id}:${sig}:${key}` -> whether the key opens that record's check. The
+  // sig covers the check, so a record rewritten under its id is checked again.
+  const checked = new Map()
   const loggedKeys = new Set()
   let updates = 0
   let refreshedAt = -1
@@ -204,7 +207,11 @@ export const createEpochStore = ({
     const nextRing = Object.create(null)
     for (const record of next.valid) {
       for (const key of offered.get(record.id) ?? []) {
-        if (opensCheck(record.check, key)) {
+        const cacheKey = `${record.id}:${record.sig}:${key}`
+        if (!checked.has(cacheKey)) {
+          checked.set(cacheKey, opensCheck(record.check, key))
+        }
+        if (checked.get(cacheKey)) {
           nextRing[record.id] = key
           break
         }

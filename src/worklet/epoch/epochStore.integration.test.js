@@ -1333,6 +1333,28 @@ describe('epochStore over real Autopass', () => {
     }
   })
 
+  it('opens each epoch check once per key', async () => {
+    const [A] = await setup(['A'])
+    const { id } = await A.store.ensureEpoch({ start: true })
+    const { check } = JSON.parse((await A.instance.get(`epoch/${id}`)).value)
+    const store = createEpochStore({
+      instance: A.instance,
+      getPersonalKeyPair: async () => A.keyPair
+    })
+    const open = jest.spyOn(sodium, 'crypto_secretbox_open_easy')
+    const checkOpens = () =>
+      open.mock.calls.filter(([, c]) => c.toString('base64') === check.c).length
+    try {
+      await store.refresh()
+      expect(checkOpens()).toBe(1)
+      await store.refresh()
+      expect(checkOpens()).toBe(1)
+      expect((await store.status()).canRead).toBe(true)
+    } finally {
+      open.mockRestore()
+    }
+  })
+
   it('does not move latest back when an older epoch is appended again', async () => {
     const [A, B] = await setup(['A', 'B'])
     // The older epoch sorts last by key and is appended last, so only seq
