@@ -943,6 +943,24 @@ describe('epochStore over real Autopass', () => {
     expect(await C.store.get('record/after')).toBeNull()
   })
 
+  it('neither seals to nor reports a roster row with an empty id', async () => {
+    const [A] = await setup(['A'])
+    const stray = rowFor('', makeKeyPair())
+    await addDevice(A, stray)
+
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      rotated: true,
+      members: ['A'],
+      uncovered: []
+    })
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: false,
+      reason: 'current'
+    })
+    await addDevice(A, { ...stray, masterTopic: undefined })
+    expect((await A.store.status()).uncovered).toEqual([])
+  })
+
   it('seals to a device whose id is __proto__ and then stays current', async () => {
     const [A] = await setup(['A'])
     const proto = makeKeyPair()
