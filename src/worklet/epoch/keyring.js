@@ -232,10 +232,7 @@ const readKey = (keyB64) => {
     throw new EpochDecryptError('Epoch key is not 32 bytes of base64')
   }
   const key = sodium.sodium_malloc(sodium.crypto_secretbox_KEYBYTES)
-  if (key.write(keyB64, 'base64') !== sodium.crypto_secretbox_KEYBYTES) {
-    free(key)
-    throw new EpochDecryptError('Epoch key is not 32 bytes of base64')
-  }
+  key.write(keyB64, 'base64')
   return key
 }
 
