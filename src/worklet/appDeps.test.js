@@ -1278,6 +1278,20 @@ describe('appDeps module functions (excluding encryption)', () => {
         }
       })
 
+      test('the merged list keeps a record whose v1 row alone is unreadable', async () => {
+        await appDeps.activeVaultAdd('record/r3', {
+          id: 'r3',
+          type: 'note',
+          data: { title: 'readable v2' }
+        })
+        vault.put('record/r3', unreadable)
+
+        for (const filterKey of ['record/', 'record-v2/']) {
+          const list = await appDeps.activeVaultList(filterKey)
+          expect(list.map((record) => record.id)).toEqual(['r3'])
+        }
+      })
+
       test('generateOtpCodesByIds gives no code from its v1 copy', async () => {
         expect(await appDeps.generateOtpCodesByIds(['r1'])).toEqual([])
       })
