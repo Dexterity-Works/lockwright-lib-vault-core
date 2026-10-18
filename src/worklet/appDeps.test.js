@@ -1228,9 +1228,11 @@ describe('appDeps module functions (excluding encryption)', () => {
         type: 'note',
         data: { title: 'edited' }
       })
-      expect(await appDeps.activeVaultGet('record/r1')).toMatchObject({
-        data: { title: 'edited' }
+      const [v1] = await appDeps.activeVaultFind({
+        gte: { key: 'record/r1' },
+        lte: { key: 'record/r1' }
       })
+      expect(v1.value).toMatchObject({ data: { title: 'edited' } })
       expect(vault.rows.get('record-v2/r1').value).toBe(unreadable)
     })
 
@@ -1259,6 +1261,21 @@ describe('appDeps module functions (excluding encryption)', () => {
       ])('%s leaves it alone', async (_, write) => {
         await expect(write()).rejects.toThrow('Record not found')
         expect(vault.rows.get('record-v2/r1').value).toBe(unreadable)
+      })
+
+      test('get and the merged list hide it instead of showing its v1 copy', async () => {
+        await appDeps.activeVaultAdd('record/r2', {
+          id: 'r2',
+          type: 'note',
+          data: { title: 'readable' }
+        })
+
+        expect(await appDeps.activeVaultGet('record/r1')).toBeNull()
+        expect(await appDeps.activeVaultGet('record-v2/r1')).toBeNull()
+        for (const filterKey of ['record/', 'record-v2/']) {
+          const list = await appDeps.activeVaultList(filterKey)
+          expect(list.map((record) => record.id)).toEqual(['r2'])
+        }
       })
 
       test('generateOtpCodesByIds gives no code from its v1 copy', async () => {

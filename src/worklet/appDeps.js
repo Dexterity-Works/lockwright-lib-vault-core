@@ -1348,8 +1348,14 @@ export const activeVaultList = async (filterKey, options = {}) => {
 
   // App login list: prefer v2 when present (merge namespaces by id).
   if (filterKey === 'record/' || filterKey === 'record-v2/') {
+    // A v2 row this device cannot read hides its record: the v1 copy may
+    // be stale, and a save from it would seal over the v2 content.
+    const hidden = new Set()
     const entries = await collectActiveVaultEntries(
-      (key) => isV1RecordKey(key) || isV2RecordKey(key)
+      (key) => isV1RecordKey(key) || isV2RecordKey(key),
+      (key) => {
+        if (isV2RecordKey(key)) hidden.add(parseRecordIdFromKey(key))
+      }
     )
     const byId = new Map()
     for (const { key, value } of entries) {
@@ -1364,6 +1370,7 @@ export const activeVaultList = async (filterKey, options = {}) => {
         if (id) byId.set(id, value)
       }
     }
+    for (const id of hidden) byId.delete(id)
     return [...byId.values()].map(enrich)
   }
 
@@ -1473,10 +1480,7 @@ export const activeVaultGet = async (key) => {
 
   const recordId = parseRecordIdFromKey(key)
   if (recordId) {
-    const found = await getRawRecordPreferV2(
-      createActiveVaultAdapter(),
-      recordId
-    )
+    const found = await getReadableRecord(recordId)
     if (!found) {
       return null
     }
