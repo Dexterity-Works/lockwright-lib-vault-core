@@ -567,7 +567,9 @@ const runEpochSync = async ({ ensure }) => {
       activeVaultInstance?.base?.writable
     ) {
       // Cleared first, so a sync that lands meanwhile does not start a
-      // second run.
+      // second run. A device that can read and write but still cannot
+      // rotate (its own row is gone, say) defers again and reruns on each
+      // update; the run stops at its first write, so that is accepted.
       migrationDeferred = false
       // runVaultMigration logs and records its own failure.
       await runVaultMigration().catch(() => {})
