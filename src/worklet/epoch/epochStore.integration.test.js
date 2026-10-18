@@ -1496,13 +1496,25 @@ describe('epochStore over real Autopass', () => {
     await A.store.remove('device/C')
     await sync(A, B)
 
-    // Each round both run before either sees the other's epoch.
+    // Each round both run before either sees the other's epoch. After the
+    // first, each writes under its own epoch.
     const rounds = []
     for (let round = 0; round < 5; round++) {
       const results = await Promise.all([
         A.store.ensureEpoch({ start: false }),
         B.store.ensureEpoch({ start: false })
       ])
+      if (round === 0) {
+        for (const [peer, result] of [
+          [A, results[0]],
+          [B, results[1]]
+        ]) {
+          await peer.store.add(`record/${peer.id}`, peer.id)
+          expect((await rawEnvelope(peer, `record/${peer.id}`)).e).toBe(
+            result.id
+          )
+        }
+      }
       await sync(A, B)
       rounds.push({
         reasons: results.map((result) => result.reason ?? 'rotated'),
@@ -1511,14 +1523,19 @@ describe('epochStore over real Autopass', () => {
     }
     expect(rounds[0].reasons).toEqual(['rotated', 'rotated'])
     // The winner's author is current; the loser carries its own key once.
+    expect(rounds[1].reasons).toContain('rotated')
     const settled = rounds.findIndex(({ reasons }) =>
       reasons.every((reason) => reason === 'current')
     )
-    expect(settled).toBeGreaterThan(0)
-    expect(settled).toBeLessThanOrEqual(2)
+    expect(settled).toBe(2)
     for (const { reasons, seq } of rounds.slice(settled)) {
       expect(reasons).toEqual(['current', 'current'])
       expect(seq).toBe(rounds[settled].seq)
+    }
+    for (const peer of [A, B]) {
+      for (const writer of [A, B]) {
+        expect(await value(peer, `record/${writer.id}`)).toBe(writer.id)
+      }
     }
   })
 
