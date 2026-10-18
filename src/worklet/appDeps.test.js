@@ -1281,6 +1281,33 @@ describe('appDeps module functions (excluding encryption)', () => {
       test('generateOtpCodesByIds gives no code from its v1 copy', async () => {
         expect(await appDeps.generateOtpCodesByIds(['r1'])).toEqual([])
       })
+
+      // A v1 record with no v2 row at all is still there.
+      const putV1Only = () =>
+        vault.put(
+          'record/r4',
+          JSON.stringify({
+            id: 'r4',
+            type: 'login',
+            data: {
+              title: 'v1 only',
+              otp: { type: 'TOTP', secret: 'JBSWY3DPEHPK3PXP' }
+            }
+          })
+        )
+
+      test('exportOtpRecords leaves out its v1 copy', async () => {
+        putV1Only()
+        const exported = await appDeps.exportOtpRecords()
+        expect(exported.map((record) => record.id)).toEqual(['r4'])
+      })
+
+      test('findOtpDuplicates does not match its v1 copy', async () => {
+        putV1Only()
+        expect(
+          await appDeps.findOtpDuplicates({ secret: 'JBSWY3DPEHPK3PXP' })
+        ).toEqual([{ id: 'r4', title: 'v1 only' }])
+      })
     })
 
     test('the migration leaves a record it cannot fully read alone', async () => {

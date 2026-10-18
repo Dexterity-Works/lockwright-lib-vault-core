@@ -340,6 +340,33 @@ const collectActiveVaultEntries = async (filterFn, onUnreadable) => {
   return results
 }
 
+/**
+ * Every record merged by id across v1 and v2, v2 first. An id whose v2 row
+ * this device cannot read is left out: its v1 copy may be stale, and a save
+ * from it would seal over the v2 content. A v1 record with no v2 row stays.
+ * @returns {Promise<object[]>}
+ */
+const listMergedRecords = async () => {
+  const hidden = new Set()
+  const entries = await collectActiveVaultEntries(
+    (key) => isV1RecordKey(key) || isV2RecordKey(key),
+    (key) => {
+      if (isV2RecordKey(key)) hidden.add(parseRecordIdFromKey(key))
+    }
+  )
+  const byId = new Map()
+  for (const { key, value } of entries) {
+    const id = parseRecordIdFromKey(key)
+    if (id && isV1RecordKey(key) && !byId.has(id)) byId.set(id, value)
+  }
+  for (const { key, value } of entries) {
+    const id = parseRecordIdFromKey(key)
+    if (id && isV2RecordKey(key)) byId.set(id, value)
+  }
+  for (const id of hidden) byId.delete(id)
+  return [...byId.values()]
+}
+
 const recordIdOfKey = (key) =>
   parseRecordIdFromKey(key) ?? parseFileKey(key)?.recordId ?? null
 
@@ -1373,30 +1400,7 @@ export const activeVaultList = async (filterKey, options = {}) => {
 
   // App login list: prefer v2 when present (merge namespaces by id).
   if (filterKey === 'record/' || filterKey === 'record-v2/') {
-    // A v2 row this device cannot read hides its record: the v1 copy may
-    // be stale, and a save from it would seal over the v2 content.
-    const hidden = new Set()
-    const entries = await collectActiveVaultEntries(
-      (key) => isV1RecordKey(key) || isV2RecordKey(key),
-      (key) => {
-        if (isV2RecordKey(key)) hidden.add(parseRecordIdFromKey(key))
-      }
-    )
-    const byId = new Map()
-    for (const { key, value } of entries) {
-      if (isV1RecordKey(key)) {
-        const id = parseRecordIdFromKey(key)
-        if (id && !byId.has(id)) byId.set(id, value)
-      }
-    }
-    for (const { key, value } of entries) {
-      if (isV2RecordKey(key)) {
-        const id = parseRecordIdFromKey(key)
-        if (id) byId.set(id, value)
-      }
-    }
-    for (const id of hidden) byId.delete(id)
-    return [...byId.values()].map(enrich)
+    return (await listMergedRecords()).map(enrich)
   }
 
   const results = (
@@ -2146,19 +2150,7 @@ export const findOtpDuplicates = async ({ secret, excludeRecordId } = {}) => {
 
   if (!secret) return []
 
-  const entries = await collectActiveVaultEntries(
-    (key) => isV1RecordKey(key) || isV2RecordKey(key)
-  )
-  const byId = new Map()
-  for (const { key, value } of entries) {
-    const id = parseRecordIdFromKey(key)
-    if (!id) continue
-    if (isV2RecordKey(key) || !byId.has(id)) {
-      byId.set(id, value)
-    }
-  }
-
-  return filterDuplicateRecords(secret, [...byId.values()], {
+  return filterDuplicateRecords(secret, await listMergedRecords(), {
     excludeRecordId
   })
 }
@@ -2175,17 +2167,5 @@ export const exportOtpRecords = async () => {
     throw new Error('Vault not initialised')
   }
 
-  const entries = await collectActiveVaultEntries(
-    (key) => isV1RecordKey(key) || isV2RecordKey(key)
-  )
-  const byId = new Map()
-  for (const { key, value } of entries) {
-    const id = parseRecordIdFromKey(key)
-    if (!id) continue
-    if (isV2RecordKey(key) || !byId.has(id)) {
-      byId.set(id, value)
-    }
-  }
-
-  return toExportableOtpRecords([...byId.values()])
+  return toExportableOtpRecords(await listMergedRecords())
 }
