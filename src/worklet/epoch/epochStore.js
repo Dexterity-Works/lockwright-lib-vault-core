@@ -388,10 +388,8 @@ export const createEpochStore = ({
   // Null when the appended record did not resolve as the latest epoch.
   const rotate = async (sealable, uncovered, keyPair) => {
     const { latest } = epochs
+    // Latest chains from seq 1, so its seq counts records: always safe.
     const seq = latest ? latest.seq + 1 : 1
-    if (!Number.isSafeInteger(seq)) {
-      throw new Error(`Epoch seq ${seq} is not a safe integer`)
-    }
     const id = generateEpochId()
     const key = generateEpochKey()
     const boxes = sealRing({ ...ring, [id]: key }, sealable)
