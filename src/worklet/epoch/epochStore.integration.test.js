@@ -443,37 +443,31 @@ describe('epochStore over real Autopass', () => {
     }
   )
 
-  it('does not let a planted top seq outlive a kick', async () => {
-    const [A, B, C] = await setup()
+  it('ignores an unchained top seq planted by a current member', async () => {
+    const [A, B] = await setup(['A', 'B'])
     const start = await A.store.ensureEpoch({ start: true })
-    await sync(A, B, C)
-    // C plants an epoch at the top of the safe range before it is kicked.
+    // B stays in the roster, so only the chain turns this record away.
     const id = '0f'.repeat(16)
-    const planted = epochBy(C.keyPair, {
+    const planted = epochBy(B.keyPair, {
       id,
       seq: Number.MAX_SAFE_INTEGER,
       ring: { [id]: generateEpochKey() },
-      to: [
-        ['A', A.keyPair],
-        ['B', B.keyPair],
-        ['C', C.keyPair]
-      ]
+      to: [['B', B.keyPair]]
     })
-    await C.instance.add(`epoch/${id}`, JSON.stringify(planted))
-    await sync(A, B, C)
-
-    const kicked = await kick(A, C)
-    expect(kicked).toMatchObject({ rotated: true, seq: start.seq + 1 })
+    await B.instance.add(`epoch/${id}`, JSON.stringify(planted))
     await sync(A, B)
-    expect(await B.store.status()).toMatchObject({
-      epoch: kicked.id,
-      seq: start.seq + 1
-    })
+
+    for (const peer of [A, B]) {
+      expect(await peer.store.status()).toMatchObject({
+        epoch: start.id,
+        seq: 1
+      })
+    }
+    await addDevice(A, rowFor('D', makeKeyPair()))
     expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
-      reason: 'current'
+      rotated: true,
+      seq: 2
     })
-    await B.store.add('record/after', 'v')
-    expect((await rawEnvelope(B, 'record/after')).e).toBe(kicked.id)
   })
 
   it('reports no rotation when another epoch resolves above the new one', async () => {
