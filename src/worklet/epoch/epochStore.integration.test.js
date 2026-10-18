@@ -1003,6 +1003,54 @@ describe('epochStore over real Autopass', () => {
     }
   })
 
+  it('carries a losing epoch key to a member that joined during the race', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    const M = await makePeer('M', A)
+    await A.instance.addWriter(M.instance.writerKey)
+    await addDevice(A, M.row)
+
+    // B starts an epoch before it sees M. Its id is all zeros, so A's wins.
+    const random = sodium.randombytes_buf
+    const lowId = jest
+      .spyOn(sodium, 'randombytes_buf')
+      .mockImplementation((buf) =>
+        buf.length === 16 ? buf.fill(0) : random.call(sodium, buf)
+      )
+    let fromB
+    try {
+      fromB = await B.store.ensureEpoch({ start: true })
+    } finally {
+      lowId.mockRestore()
+    }
+    const fromA = await A.store.ensureEpoch({ start: true })
+    expect(fromB).toMatchObject({ rotated: true, seq: 1, members: ['A', 'B'] })
+    expect(fromA).toMatchObject({
+      rotated: true,
+      seq: 1,
+      members: ['A', 'B', 'M']
+    })
+    await B.store.add('record/b', 'from B')
+    expect((await rawEnvelope(B, 'record/b')).e).toBe(fromB.id)
+    await sync(A, B, M)
+    expect((await A.store.status()).epoch).toBe(fromA.id)
+
+    // B goes offline. A holds B's key, and latest seals to M, which B's
+    // epoch did not.
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      seq: 2,
+      members: ['A', 'B', 'M']
+    })
+    await sync(A, M)
+    expect(await value(M, 'record/b')).toBe('from B')
+    for (const peer of [A, M]) {
+      expect(await peer.store.ensureEpoch({ start: false })).toMatchObject({
+        rotated: false,
+        reason: 'current'
+      })
+    }
+  })
+
   it('reads while a rotation is owed only when it holds every epoch key', async () => {
     const [A, B, C] = await setup()
     await C.store.ensureEpoch({ start: true })
