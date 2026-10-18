@@ -919,6 +919,28 @@ describe('epochStore over real Autopass', () => {
     })
   })
 
+  it('seals to a device whose id is __proto__ and then stays current', async () => {
+    const [A] = await setup(['A'])
+    const proto = makeKeyPair()
+    await addDevice(A, rowFor('__proto__', proto))
+
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      rotated: true,
+      members: ['A', '__proto__'],
+      uncovered: []
+    })
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: false,
+      reason: 'current'
+    })
+    await A.store.add('record/x', 'v')
+    const asProto = createEpochStore({
+      instance: A.instance,
+      getPersonalKeyPair: async () => proto
+    })
+    expect(await value({ store: asProto }, 'record/x')).toBe('v')
+  })
+
   it('rotates again when a chain restart sealed a partial ring', async () => {
     const [A, B, C] = await setup()
     await C.store.ensureEpoch({ start: true })

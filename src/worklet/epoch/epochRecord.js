@@ -68,7 +68,10 @@ export const buildEpochRecord = ({
     prev,
     createdAt,
     by: personalKeyPair.publicKey.toString('hex'),
-    members: Object.fromEntries(memberPairs(members)),
+    members: Object.assign(
+      Object.create(null),
+      Object.fromEntries(memberPairs(members))
+    ),
     check: { n: check.n, c: check.c }
   }
   const sig = Buffer.alloc(sodium.crypto_sign_BYTES)

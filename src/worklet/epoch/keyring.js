@@ -120,12 +120,13 @@ export const canSealTo = (masterTopic) => toCurvePublicKey(masterTopic) !== null
  * Members whose key cannot be sealed to are left out of the result.
  * @param {Record<string, string>} ring epochId -> key b64
  * @param {Array<{ id: string, masterTopic: string }>} members
- * @returns {Record<string, string>} deviceId -> sealed box b64
+ * @returns {Record<string, string>} deviceId -> sealed box b64, with no
+ *   prototype, so a device id such as `__proto__` is an own key
  */
 export const sealRing = (ring, members) => {
   const message = secureFrom(JSON.stringify(ring), 'utf8')
   try {
-    const sealed = {}
+    const sealed = Object.create(null)
     for (const { id, masterTopic } of members) {
       const curvePk = toCurvePublicKey(masterTopic)
       if (!curvePk) continue
@@ -142,7 +143,7 @@ export const sealRing = (ring, members) => {
 /**
  * @param {string} sealedB64
  * @param {{ publicKey: Buffer, secretKey: Buffer }} personalKeyPair
- * @returns {Record<string, string> | null}
+ * @returns {Record<string, string> | null} with no prototype
  */
 export const openRing = (sealedB64, personalKeyPair) => {
   if (typeof sealedB64 !== 'string') return null
@@ -167,7 +168,7 @@ export const openRing = (sealedB64, personalKeyPair) => {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return null
     }
-    const ring = {}
+    const ring = Object.create(null)
     for (const [epochId, key] of Object.entries(parsed)) {
       if (isEpochKey(key)) ring[epochId] = key
     }

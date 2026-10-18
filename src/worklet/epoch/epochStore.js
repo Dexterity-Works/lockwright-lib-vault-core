@@ -48,6 +48,11 @@ const refuseEpochKey = (key) => {
   }
 }
 
+// A lone surrogate would sort and sign as U+FFFD, so two ids could share
+// one place in the canonical member order.
+const isDeviceId = (id) =>
+  typeof id === 'string' && id.length > 0 && id.isWellFormed()
+
 const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x))
 
 /**
@@ -133,24 +138,27 @@ export const createEpochStore = ({
 
   // A row is the device its key names. One whose value names another id is
   // malformed: it is not sealed to, not an author, and not uncovered, so a
-  // planted row cannot stand in for a real device.
+  // planted row cannot stand in for a real device. Rows have no prototype,
+  // so a field the row lacks never comes from Object.prototype.
   const readRoster = async () =>
     (await readPrefix('device/'))
       .map(({ key, value }) => ({ id: key.slice('device/'.length), value }))
       .filter(
         ({ id, value }) =>
+          isDeviceId(id) &&
           value &&
           typeof value === 'object' &&
           (value.id === undefined || value.id === id)
       )
-      .map(({ id, value }) => ({
-        ...value,
-        id,
-        // Anything but a usable key string counts as no masterTopic.
-        masterTopic: canSealTo(value.masterTopic)
-          ? value.masterTopic
-          : undefined
-      }))
+      .map(({ id, value }) =>
+        Object.assign(Object.create(null), value, {
+          id,
+          // Anything but a usable key string counts as no masterTopic.
+          masterTopic: canSealTo(value.masterTopic)
+            ? value.masterTopic
+            : undefined
+        })
+      )
 
   const verifyOnce = (record, { key, raw }) => {
     const cacheKey = `${key}:${record?.sig}`
@@ -377,8 +385,9 @@ export const createEpochStore = ({
   // partial ring (a chain restarted by a joiner, say), so the other members
   // may lack it too.
   const holdsMoreThan = (latest) => {
-    const box = openedBoxes.get(`${latest.id}:${latest.sig}`) ?? {}
-    return Object.keys(ring).some((epochId) => box[epochId] !== ring[epochId])
+    // openRing gives a box with no prototype.
+    const box = openedBoxes.get(`${latest.id}:${latest.sig}`)
+    return Object.keys(ring).some((epochId) => box?.[epochId] !== ring[epochId])
   }
 
   const isMe = (masterTopic, keyPair) =>
@@ -392,10 +401,13 @@ export const createEpochStore = ({
     const seq = latest ? latest.seq + 1 : 1
     const id = generateEpochId()
     const key = generateEpochKey()
-    const boxes = sealRing({ ...ring, [id]: key }, sealable)
-    const members = {}
+    const boxes = sealRing(
+      Object.assign(Object.create(null), ring, { [id]: key }),
+      sealable
+    )
+    const members = Object.create(null)
     for (const row of sealable) {
-      if (boxes[row.id]) {
+      if (Object.hasOwn(boxes, row.id)) {
         members[row.id] = {
           topic: row.masterTopic.toLowerCase(),
           box: boxes[row.id]
