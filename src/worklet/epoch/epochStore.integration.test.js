@@ -600,6 +600,21 @@ describe('epochStore over real Autopass', () => {
     expect(await value(A, 'record/r')).toBe('v')
   })
 
+  it('rejects a write with the error its rotation append threw', async () => {
+    const [A] = await setup()
+    await A.store.ensureEpoch({ start: true })
+    await A.store.remove('device/C')
+    const add = A.instance.add.bind(A.instance)
+    const failure = new Error('append failed')
+    A.instance.add = async (key, ...rest) => {
+      if (key.startsWith('epoch/')) throw failure
+      return add(key, ...rest)
+    }
+
+    await expect(A.store.add('record/r', 'v')).rejects.toBe(failure)
+    expect(await A.instance.get('record/r')).toBeNull()
+  })
+
   it('omits an envelope whose epoch id was edited', async () => {
     const [A, , C] = await setup()
     const first = await kick(A, C)
