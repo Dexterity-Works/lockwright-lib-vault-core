@@ -242,6 +242,9 @@ const readKey = (keyB64) => {
  * @param {string} plaintext
  * @param {Buffer} [fileBuffer]
  * @returns {{ envelope: string, file?: Buffer }}
+ * @throws {EpochDecryptError} when keyB64 is not an epoch key. The ring
+ *   holds checked keys only, so this does not happen in practice; readKey
+ *   shares the error type with the decrypt path on purpose.
  */
 export const encryptValue = (epochId, keyB64, plaintext, fileBuffer) => {
   const key = readKey(keyB64)
