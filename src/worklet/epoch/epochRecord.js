@@ -8,6 +8,16 @@ const isHex = (value, length) =>
 
 const VERSION = 1
 
+/**
+ * A device id is a non-empty, well-formed string: a lone surrogate would
+ * sort as U+FFFD in the member order. Storage already turns one in a row
+ * key into U+FFFD, so for roster ids the surrogate check is extra defence.
+ * @param {unknown} id
+ * @returns {boolean}
+ */
+export const isDeviceId = (id) =>
+  typeof id === 'string' && id.length > 0 && id.isWellFormed()
+
 // UTF-8 byte order is code-point order.
 const byCodePoint = (a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b))
 
@@ -131,6 +141,7 @@ const isWellFormed = (record) =>
   !!record.members &&
   typeof record.members === 'object' &&
   !Array.isArray(record.members) &&
+  Object.keys(record.members).every(isDeviceId) &&
   Object.values(record.members).every(isMember) &&
   isCheck(record.check) &&
   isHex(record.sig, 128)

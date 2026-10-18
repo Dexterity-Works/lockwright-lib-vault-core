@@ -209,6 +209,22 @@ describe('epochRecord', () => {
     expect(verifySignature(record)).toBe(true)
   })
 
+  it('applies the device id rule to member ids', () => {
+    const member = { topic: hex(b), box: 'x' }
+    // Each signed over its own ids, so only the id rule turns them away.
+    for (const id of ['', '\uD800']) {
+      const record = build({ members: { [id]: member } })
+      expect(verifySignature(record)).toBe(false)
+      expect(verifySignature(JSON.parse(JSON.stringify(record)))).toBe(false)
+    }
+    // __proto__ is an ordinary own key once stored.
+    const proto = JSON.parse(
+      JSON.stringify(build({ members: { ['__proto__']: member } }))
+    )
+    expect(Object.keys(proto.members)).toEqual(['__proto__'])
+    expect(verifySignature(proto)).toBe(true)
+  })
+
   it('rejects fields the signature does not cover, at either level', () => {
     const record = build()
     const extraMember = {

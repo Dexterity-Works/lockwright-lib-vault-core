@@ -1,6 +1,7 @@
 import {
   generateEpochId,
   buildEpochRecord,
+  isDeviceId,
   resolveEpochs,
   verifySignature
 } from './epochRecord.js'
@@ -47,12 +48,6 @@ const refuseEpochKey = (key) => {
     throw new EpochRecordWriteError(key)
   }
 }
-
-// A device id is a non-empty, well-formed string. Storage already turns a
-// lone surrogate in a row key into U+FFFD, so the surrogate check is extra
-// defence.
-const isDeviceId = (id) =>
-  typeof id === 'string' && id.length > 0 && id.isWellFormed()
 
 const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x))
 
