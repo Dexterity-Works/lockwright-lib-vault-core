@@ -13,6 +13,7 @@ import {
   EpochRecordWriteError,
   EpochRotationPendingError,
   generateEpochKey,
+  openRing,
   sealCheck,
   sealRing
 } from './keyring.js'
@@ -424,15 +425,21 @@ describe('epochStore over real Autopass', () => {
       await sync(A, B)
 
       expect(kicked).toMatchObject({ rotated: true, members: ['A', 'B'] })
+      // A key C sealed to the rest after the kick is one the kick's ring
+      // lacks, which costs one rotation by a current member.
+      const healed = await A.store.ensureEpoch({ start: false })
+      expect(healed.rotated).toBe(when === 'after' && sealedTo === 'the rest')
+      const latest = healed.rotated ? healed.id : kicked.id
+      await sync(A, B)
       for (const peer of [A, B]) {
         expect(await peer.store.ensureEpoch({ start: false })).toMatchObject({
           rotated: false,
           reason: 'current'
         })
-        expect((await peer.store.status()).epoch).toBe(kicked.id)
+        expect((await peer.store.status()).epoch).toBe(latest)
       }
       await B.store.add('record/after', 'v')
-      expect((await rawEnvelope(B, 'record/after')).e).toBe(kicked.id)
+      expect((await rawEnvelope(B, 'record/after')).e).toBe(latest)
     }
   )
 
@@ -473,17 +480,21 @@ describe('epochStore over real Autopass', () => {
     const [A, B] = await setup(['A', 'B'])
     const add = A.instance.add.bind(A.instance)
     let rival = null
-    // B's epoch with the same seq and a higher id lands right behind A's.
+    // B's epoch with the same seq and a higher id lands right behind A's,
+    // sealing the keys B opened from A's.
     A.instance.add = async (key, record, file) => {
       await add(key, record, file)
       if (rival || !key.startsWith('epoch/')) return
-      const { seq, prev } = JSON.parse(record)
+      const { seq, prev, members } = JSON.parse(record)
       const id = 'ff'.repeat(16)
       rival = epochBy(B.keyPair, {
         id,
         seq,
         prev,
-        ring: { [id]: generateEpochKey() },
+        ring: {
+          ...openRing(members.B.box, B.keyPair),
+          [id]: generateEpochKey()
+        },
         to: [
           ['A', A.keyPair],
           ['B', B.keyPair]
@@ -862,6 +873,44 @@ describe('epochStore over real Autopass', () => {
       members: ['A', 'B'],
       uncovered: []
     })
+  })
+
+  it('rotates again when a chain restart sealed a partial ring', async () => {
+    const [A, B, C] = await setup()
+    await C.store.ensureEpoch({ start: true })
+    await C.store.add('record/c', 'from C')
+    const D = await makePeer('D', A)
+    await A.instance.addWriter(D.instance.writerKey)
+    await addDevice(A, D.row)
+    await sync(A, B, C, D)
+    expect(await D.store.ensureEpoch({ start: false })).toMatchObject({
+      reason: 'pending'
+    })
+
+    // C leaves, and the pending joiner restarts the chain with its empty ring.
+    await A.store.remove('device/C')
+    await sync(A, B, D)
+    expect(await D.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      seq: 1,
+      members: ['A', 'B', 'D']
+    })
+    await sync(A, B, D)
+
+    // Same members, but A holds C's key and D's epoch did not seal it.
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      seq: 2,
+      members: ['A', 'B', 'D']
+    })
+    await sync(A, B, D)
+    expect(await value(D, 'record/c')).toBe('from C')
+    for (const peer of [A, B, D]) {
+      expect(await peer.store.ensureEpoch({ start: false })).toMatchObject({
+        rotated: false,
+        reason: 'current'
+      })
+    }
   })
 
   it('refuses add and remove on epoch keys', async () => {

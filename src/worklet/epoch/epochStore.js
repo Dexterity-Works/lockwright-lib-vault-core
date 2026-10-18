@@ -75,7 +75,8 @@ export const createEpochStore = ({
   let ring = Object.create(null)
   // epochId -> every key b64 an opened box offered for it.
   const offered = new Map()
-  const openedRecords = new Set()
+  // `${id}:${sig}` -> the ring my box in that record held, or null.
+  const openedBoxes = new Map()
   // `${key}:${sig}` -> { raw, ok }. The raw value is part of the hit, so a
   // row rewritten under the same key with a copied sig is verified again.
   const verified = new Map()
@@ -176,13 +177,14 @@ export const createEpochStore = ({
     const myTopic = keyPair.publicKey.toString('hex')
     for (const record of next.valid) {
       const cacheKey = `${record.id}:${record.sig}`
-      if (openedRecords.has(cacheKey)) continue
-      openedRecords.add(cacheKey)
+      if (openedBoxes.has(cacheKey)) continue
+      openedBoxes.set(cacheKey, null)
       for (const { topic, box } of Object.values(record.members)) {
         if (topic !== myTopic) continue
         const opened = openRing(box, keyPair)
         if (!opened) continue
         for (const [epochId, key] of Object.entries(opened)) offer(epochId, key)
+        openedBoxes.set(cacheKey, opened)
         break
       }
     }
@@ -368,6 +370,14 @@ export const createEpochStore = ({
     return !memberPairs(latest).every((pair) => allowed.includes(pair))
   }
 
+  // A key I hold that latest's box for me lacks: its author sealed a
+  // partial ring (a chain restarted by a joiner, say), so the other members
+  // may lack it too.
+  const holdsMoreThan = (latest) => {
+    const box = openedBoxes.get(`${latest.id}:${latest.sig}`) ?? {}
+    return Object.keys(ring).some((epochId) => box[epochId] !== ring[epochId])
+  }
+
   const isMe = (masterTopic, keyPair) =>
     typeof masterTopic === 'string' &&
     masterTopic.toLowerCase() === keyPair.publicKey.toString('hex')
@@ -437,7 +447,10 @@ export const createEpochStore = ({
     // A device that cannot open the latest ring would seal a ring without
     // the history; leave the rotation to a member that holds it.
     if (!ring[latest.id]) return skip('pending')
-    if (sameSet(memberPairs(latest), sealablePairs(sealable))) {
+    if (
+      sameSet(memberPairs(latest), sealablePairs(sealable)) &&
+      !holdsMoreThan(latest)
+    ) {
       return skip('current')
     }
     return rotateNow()
