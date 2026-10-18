@@ -1603,6 +1603,7 @@ describe('appDeps module functions (excluding encryption)', () => {
       // Armed once the reconcile ran, so the next vault-ext read is the
       // resumed migration's: a device pairs and the epoch rotates then.
       const instance = appDeps.getActiveVaultInstance()
+      let arming = false
       let armed = false
       const get = instance.get
       instance.get = jest.fn(async (key) => {
@@ -1613,12 +1614,18 @@ describe('appDeps module functions (excluding encryption)', () => {
         }
         return get(key)
       })
-      await appDeps.initListener({
-        vaultId: 'vault1',
-        onUpdate: () => {
-          armed = true
-        }
+      const onUpdate = jest.fn(() => {
+        if (arming) armed = true
       })
+      await appDeps.initListener({ vaultId: 'vault1', onUpdate })
+
+      // Let the reopen's own sync settle first, so the resume below is the
+      // one the hook sees, whatever the sync's internal awaits look like.
+      instance.emit('update')
+      await waitFor(() => onUpdate.mock.calls.length > 0)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      arming = true
       instance.base.writable = true
       instance.emit('update')
       await waitFor(() => appDeps.getVaultMigrationStatus().ready)
