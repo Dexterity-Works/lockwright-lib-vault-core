@@ -948,11 +948,13 @@ describe('appDeps module functions (excluding encryption)', () => {
 
       const onUpdate = jest.fn()
       await appDeps.initListener({ vaultId: 'vault1', onUpdate })
+      const listeners = active.listenerCount('update')
 
       removeListenerSpy.mockClear()
 
       await appDeps.initListener({ vaultId: 'vault1', onUpdate })
       expect(removeListenerSpy).not.toHaveBeenCalled()
+      expect(active.listenerCount('update')).toBe(listeners)
 
       active.emit('update')
       await waitFor(() => onUpdate.mock.calls.length > 0)
