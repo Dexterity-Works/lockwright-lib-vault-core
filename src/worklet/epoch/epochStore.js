@@ -89,8 +89,11 @@ export const createEpochStore = ({
   let queued = null
   // A start that could not run (kick while not writable, say) stays owed:
   // the roster rows are gone, so nothing else would start the epoch.
-  // Null until read from the local core.
+  // What the local core holds: null until read, and again once a write
+  // failed.
   let startOwed = null
+  // Owed here but not yet written: the next run writes it again.
+  let unsavedOwed = false
 
   instance.on('update', () => {
     updates++
@@ -457,6 +460,7 @@ export const createEpochStore = ({
   }
 
   const readStartOwed = async () => {
+    if (unsavedOwed) return true
     if (startOwed !== null) return startOwed
     try {
       const stored = await instance.base.local.getUserData(START_OWED)
@@ -472,13 +476,16 @@ export const createEpochStore = ({
 
   const writeStartOwed = async (owed) => {
     if (owed === startOwed) return
-    startOwed = owed
     try {
       await instance.base.local.setUserData(
         START_OWED,
         Buffer.from(owed ? '1' : '0')
       )
+      startOwed = owed
+      unsavedOwed = false
     } catch (error) {
+      startOwed = null
+      unsavedOwed = owed
       logger.warn('epochStore: could not persist the owed start', {
         error: error?.name
       })

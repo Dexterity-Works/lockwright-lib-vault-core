@@ -1061,6 +1061,36 @@ describe('epochStore over real Autopass', () => {
     })
   })
 
+  it('writes an owed start again after its write failed', async () => {
+    const [A] = await setup(['A'])
+    Object.defineProperty(A.instance.base, 'writable', {
+      value: false,
+      configurable: true
+    })
+    const { local } = A.instance.base
+    local.setUserData = async () => {
+      delete local.setUserData
+      throw new Error('disk full')
+    }
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      reason: 'not-writable'
+    })
+    // A later run, still unable to rotate, writes the owed start.
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      reason: 'not-writable'
+    })
+
+    delete A.instance.base.writable
+    const restarted = createEpochStore({
+      instance: A.instance,
+      getPersonalKeyPair: async () => A.keyPair
+    })
+    expect(await restarted.ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      seq: 1
+    })
+  })
+
   it('leaves an owed start in place when a run cannot read it', async () => {
     const [A] = await setup(['A'])
     Object.defineProperty(A.instance.base, 'writable', {
