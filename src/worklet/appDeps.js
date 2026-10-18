@@ -98,6 +98,7 @@ let vaultMigrationStatus = {
 // The migration waits for this device to write the epoch: runEpochSync
 // runs it again once it can.
 let migrationDeferred = false
+const EPOCH_KEY_PENDING = 'epoch-key-pending'
 
 /** @type {Set<string>} */
 let previousV1RecordIds = new Set()
@@ -119,7 +120,9 @@ const rateLimiter = new RateLimiter()
 
 /**
  * UI can wait on migrate completeness before listing records.
- * `deferred`: waiting until this device can write the epoch; not an error.
+ * `deferred`: waiting until this device can write the epoch. `error` is then
+ * `EPOCH_KEY_PENDING`, so a gate that fails open on `error && !inProgress`
+ * does not wait out its timeout; the resume clears both.
  * @returns {{ ready: boolean, inProgress: boolean, deferred: boolean, migratedToSchema: number|null, error: string|null, lastResult: object|null, progress: { done: number, total: number }|null }}
  */
 export const getVaultMigrationStatus = () => ({ ...vaultMigrationStatus })
@@ -467,7 +470,9 @@ const runVaultMigration = async () => {
       inProgress: false,
       deferred: migrationDeferred,
       migratedToSchema: null,
-      error: migrationDeferred ? null : error?.message || String(error),
+      error: migrationDeferred
+        ? EPOCH_KEY_PENDING
+        : error?.message || String(error),
       lastResult: null
     }
     throw error

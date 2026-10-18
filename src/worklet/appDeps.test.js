@@ -1353,10 +1353,12 @@ describe('appDeps module functions (excluding encryption)', () => {
       )
       vault.rows.delete('device/other')
       await reopen({ writable: false })
+      // The error code lets the surfaces' boot gate fail open at once.
       expect(appDeps.getVaultMigrationStatus()).toMatchObject({
         ready: false,
+        inProgress: false,
         deferred: true,
-        error: null
+        error: 'epoch-key-pending'
       })
 
       const fireUpdate = await listen()
