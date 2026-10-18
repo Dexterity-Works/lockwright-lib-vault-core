@@ -510,6 +510,56 @@ describe('epochStore over real Autopass', () => {
     expect((await A.store.status()).epoch).toBe(rival.id)
   })
 
+  // After each of A's next `count` epoch appends, B's epoch with the same
+  // seq and a higher id lands right behind it, sealed to `to`.
+  const rivalEach = (A, B, count, to) => {
+    const add = A.instance.add.bind(A.instance)
+    const rivals = []
+    A.instance.add = async (key, record, file) => {
+      await add(key, record, file)
+      if (rivals.length >= count || !key.startsWith('epoch/')) return
+      const { seq, prev } = JSON.parse(record)
+      const id = `${'ff'.repeat(15)}0${rivals.length}`
+      const rival = epochBy(B.keyPair, {
+        id,
+        seq,
+        prev,
+        ring: { [id]: generateEpochKey() },
+        to
+      })
+      rivals.push(rival)
+      await add(`epoch/${id}`, JSON.stringify(rival))
+    }
+    return rivals
+  }
+
+  it('reports pending when the epoch above the new one is not sealed to it', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    const rivals = rivalEach(A, B, 1, [['B', B.keyPair]])
+
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      rotated: false,
+      reason: 'pending'
+    })
+    expect((await A.store.status()).epoch).toBe(rivals[0].id)
+  })
+
+  it('throws when the rotation after a lost race is overtaken too', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    // Each rival lists a device outside the roster, so A rotates past it.
+    const to = [
+      ['A', A.keyPair],
+      ['B', B.keyPair],
+      ['X', makeKeyPair()]
+    ]
+    const rivals = rivalEach(A, B, 2, to)
+
+    await expect(A.store.ensureEpoch({ start: true })).rejects.toThrow(
+      'Epoch rotation did not resolve as latest'
+    )
+    expect(rivals).toHaveLength(2)
+  })
+
   it('omits an envelope whose epoch id was edited', async () => {
     const [A, , C] = await setup()
     const first = await kick(A, C)
