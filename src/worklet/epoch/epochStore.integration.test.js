@@ -1403,6 +1403,30 @@ describe('epochStore over real Autopass', () => {
     }
   })
 
+  it('drops the old key once the author rewrites its epoch with a new one', async () => {
+    const [A] = await setup(['A'])
+    const { id } = await A.store.ensureEpoch({ start: true })
+    await A.store.add('record/old', 'v')
+
+    // Same id, a new key and check, signed again.
+    const rewritten = epochBy(A.keyPair, {
+      id,
+      seq: 1,
+      ring: { [id]: generateEpochKey() },
+      to: [['A', A.keyPair]]
+    })
+    await A.instance.add(`epoch/${id}`, JSON.stringify(rewritten))
+    await A.store.refresh()
+
+    expect(await A.store.get('record/old')).toBeNull()
+    await A.store.add('record/new', 'w')
+    const fresh = createEpochStore({
+      instance: A.instance,
+      getPersonalKeyPair: async () => A.keyPair
+    })
+    expect(await value({ store: fresh }, 'record/new')).toBe('w')
+  })
+
   it('does not move latest back when an older epoch is appended again', async () => {
     const [A, B] = await setup(['A', 'B'])
     // The older epoch sorts last by key and is appended last, so only seq
