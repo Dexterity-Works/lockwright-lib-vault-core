@@ -48,10 +48,15 @@ describe('epochRecord', () => {
 
   it('signs members as pairs in code-point order, integer-like ids too', () => {
     const topic = hex(b)
+    // UTF-16 order puts the astral id (surrogates D83D DE00) before U+FF5E.
+    const astral = '\u{1F600}'
+    const bmp = '\uFF5E'
     const record = build({
       members: {
         9: { topic, box: 'x' },
         10: { topic, box: 'y' },
+        [astral]: { topic, box: 'a' },
+        [bmp]: { topic, box: 'b' },
         B: { topic, box: 'z' }
       }
     })
@@ -67,7 +72,9 @@ describe('epochRecord', () => {
       members: [
         ['10', { topic, box: 'y' }],
         ['9', { topic, box: 'x' }],
-        ['B', { topic, box: 'z' }]
+        ['B', { topic, box: 'z' }],
+        [bmp, { topic, box: 'b' }],
+        [astral, { topic, box: 'a' }]
       ],
       check: c
     })
