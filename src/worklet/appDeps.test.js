@@ -308,6 +308,10 @@ const useMemoryVault = (instance, rows = new Map()) => {
     }
   }))
   instance.base.writable = true
+  // Every writer a row names is a current writer.
+  instance.base.system = {
+    get: async () => ({ isIndexer: true, isRemoved: false, length: 1 })
+  }
   const put = (key, value) => rows.set(key, { key, value, file: null })
   return { rows, put }
 }
@@ -319,8 +323,13 @@ const makeSignKeyPair = () => {
   return { publicKey, secretKey }
 }
 
+// The signing key stands in as the writer key: unique per device.
 const deviceRow = (id, keyPair) =>
-  JSON.stringify({ id, masterTopic: keyPair.publicKey.toString('hex') })
+  JSON.stringify({
+    id,
+    writerKey: keyPair.publicKey.toString('hex'),
+    masterTopic: keyPair.publicKey.toString('hex')
+  })
 
 const waitFor = async (check) => {
   for (let i = 0; i < 200 && !check(); i++) {
@@ -1751,7 +1760,10 @@ describe('appDeps module functions (excluding encryption)', () => {
         if (key.startsWith('epoch/')) throw new Error('disk full')
         return add(key, ...rest)
       })
-      vault.put('device/legacy', JSON.stringify({ id: 'legacy' }))
+      vault.put(
+        'device/legacy',
+        JSON.stringify({ id: 'legacy', writerKey: 'ab'.repeat(32) })
+      )
       vault.put('device/other', deviceRow('other', makeSignKeyPair()))
       await fireUpdate()
 

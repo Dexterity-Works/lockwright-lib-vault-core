@@ -37,6 +37,18 @@ const rowFor = (id, keyPair, writerKey) => ({
   createdAt: Date.now()
 })
 
+// A current writer no peer here runs. A roster row counts only while its
+// writer is a current writer, so a device that is not a peer needs one.
+const strayWriter = async (host) => {
+  const key = Buffer.alloc(32)
+  sodium.randombytes_buf(key)
+  await host.instance.addWriter(key)
+  return key
+}
+
+const strayRow = async (host, id, keyPair = makeKeyPair()) =>
+  rowFor(id, keyPair, await strayWriter(host))
+
 const makePeer = async (id, host, keyPair = makeKeyPair()) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'epoch-store-'))
   const corestore = new Corestore(dir)
@@ -185,8 +197,8 @@ const revokedFor = async ({
   const e1 = '01'.repeat(16)
   const e2 = '02'.repeat(16)
   const k1 = generateEpochKey()
-  if (authorInRoster) await addDevice(X, rowFor('O', O))
-  if (myRow) await addDevice(X, myRow(X))
+  if (authorInRoster) await addDevice(X, await strayRow(X, 'O', O))
+  if (myRow) await addDevice(X, await myRow(X))
   const records = [
     epochBy(O, {
       id: e1,
@@ -287,7 +299,7 @@ describe('epochStore over real Autopass', () => {
       expect(await value(B, `record/${n}`)).toBe(`v${n}`)
     expect((await B.store.status()).canRead).toBe(true)
 
-    await addDevice(A, rowFor('D', makeKeyPair()))
+    await addDevice(A, await strayRow(A, 'D'))
     expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
       rotated: true,
       seq: 2,
@@ -327,7 +339,7 @@ describe('epochStore over real Autopass', () => {
     const [A, B, C] = await setup()
     const first = await kick(A, C)
     const firstRecord = (await A.instance.get(`epoch/${first.id}`)).value
-    await addDevice(A, rowFor('D', makeKeyPair()))
+    await addDevice(A, await strayRow(A, 'D'))
     const second = await A.store.ensureEpoch({ start: false })
     expect(second.seq).toBe(2)
 
@@ -463,7 +475,7 @@ describe('epochStore over real Autopass', () => {
         seq: 1
       })
     }
-    await addDevice(A, rowFor('D', makeKeyPair()))
+    await addDevice(A, await strayRow(A, 'D'))
     expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
       rotated: true,
       seq: 2
@@ -591,7 +603,7 @@ describe('epochStore over real Autopass', () => {
   it('omits an envelope whose epoch id was edited', async () => {
     const [A, , C] = await setup()
     const first = await kick(A, C)
-    await addDevice(A, rowFor('D', makeKeyPair()))
+    await addDevice(A, await strayRow(A, 'D'))
     await A.store.ensureEpoch({ start: false })
     await A.store.add('record/z', '{"title":"z"}')
 
@@ -616,7 +628,7 @@ describe('epochStore over real Autopass', () => {
     await A.store.add('record/legacy', 'v0')
     await kick(A, C)
     await A.store.add('record/1', 'v1')
-    await addDevice(A, rowFor('E', makeKeyPair()))
+    await addDevice(A, await strayRow(A, 'E'))
     await A.store.ensureEpoch({ start: false })
     await A.store.add('record/2', 'v2')
 
@@ -655,7 +667,11 @@ describe('epochStore over real Autopass', () => {
 
   it('stays plaintext in a legacy vault and reports uncovered rows', async () => {
     const [A] = await setup(['A'])
-    await addDevice(A, { id: 'L', name: 'legacy device', createdAt: 1 })
+    await addDevice(A, {
+      ...(await strayRow(A, 'L')),
+      name: 'legacy device',
+      masterTopic: undefined
+    })
     // A stale row of A from before it had a masterTopic is not uncovered.
     await addDevice(A, { id: 'A-old', writerKey: A.row.writerKey })
     await A.store.add('record/a', '{"title":"a"}')
@@ -804,8 +820,14 @@ describe('epochStore over real Autopass', () => {
 
   it('rotates past rows whose masterTopic is not a usable key', async () => {
     const [A] = await setup(['A'])
-    await addDevice(A, { id: 'Y', masterTopic: '00'.repeat(32) })
-    await addDevice(A, { id: 'Z', masterTopic: '01' + '00'.repeat(31) })
+    await addDevice(A, {
+      ...(await strayRow(A, 'Y')),
+      masterTopic: '00'.repeat(32)
+    })
+    await addDevice(A, {
+      ...(await strayRow(A, 'Z')),
+      masterTopic: '01' + '00'.repeat(31)
+    })
 
     expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
       rotated: true,
@@ -821,7 +843,7 @@ describe('epochStore over real Autopass', () => {
   it('keeps working with a roster row whose masterTopic is a number', async () => {
     const [A] = await setup(['A'])
     // device/0 sorts before device/A, so every roster scan meets it first.
-    await addDevice(A, { id: '0', masterTopic: 12345 })
+    await addDevice(A, { ...(await strayRow(A, '0')), masterTopic: 12345 })
     await A.store.ensureEpoch({ start: true })
     await A.store.add('record/n', 'v')
 
@@ -898,7 +920,7 @@ describe('epochStore over real Autopass', () => {
   it('keeps the epoch mode and later keys when a member deletes the genesis', async () => {
     const [A, B, C] = await setup()
     const first = await A.store.ensureEpoch({ start: true })
-    await addDevice(A, rowFor('D', makeKeyPair()))
+    await addDevice(A, await strayRow(A, 'D'))
     expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
       rotated: true,
       seq: 2
@@ -995,10 +1017,110 @@ describe('epochStore over real Autopass', () => {
     expect((await A.store.status()).uncovered).toEqual([])
   })
 
+  it('never seals to a row a kicked writer appended concurrently with its removal', async () => {
+    // Autobase orders a removed writer's concurrent node before or after
+    // the removal by key bytes, so the row survives in some runs only.
+    let survived = 0
+    for (let run = 0; run < 20 && survived < 2; run++) {
+      const [A, B, C] = await setup()
+      await indexed(A, B, C)
+      await A.instance.removeWriter(C.instance.writerKey)
+      await A.store.remove('device/C')
+      await A.store.ensureEpoch({ start: true })
+      // C is offline for the kick and adds itself again under a fresh id.
+      await addDevice(C, rowFor('C2', C.keyPair, C.instance.writerKey))
+      await sync(A, B, C)
+      for (let round = 0; round < 5; round++) {
+        for (const peer of [A, B, C]) await peer.instance.base.ack()
+        await sync(A, B, C)
+      }
+      if (await A.instance.get('device/C2')) survived++
+
+      for (const peer of [A, B, C]) {
+        await peer.store.ensureEpoch({ start: false })
+      }
+      await A.store.add('record/after', 'secret')
+      await sync(A, B, C)
+
+      expect(await value(B, 'record/after')).toBe('secret')
+      expect(await C.store.get('record/after')).toBeNull()
+      expect(await A.store.status()).toMatchObject({
+        members: ['A', 'B'],
+        uncovered: []
+      })
+      for (const peer of peers.splice(0)) {
+        await peer.instance.close()
+        await peer.corestore.close()
+        fs.rmSync(peer.dir, { recursive: true, force: true })
+      }
+    }
+    expect(survived).toBeGreaterThan(0)
+  })
+
+  it('seals to a device that heals its own row under the same id', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    await addDevice(B, { ...B.row, masterTopic: undefined })
+    await sync(A, B)
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      rotated: true,
+      members: ['A'],
+      uncovered: ['B']
+    })
+
+    await addDevice(B, B.row)
+    await sync(A, B)
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      members: ['A', 'B'],
+      uncovered: []
+    })
+    await A.store.add('record/x', 'v')
+    await sync(A, B)
+    expect(await value(B, 'record/x')).toBe('v')
+  })
+
+  it('counts only the first masterTopic a writer key names', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    const puppet = makeKeyPair()
+    await addDevice(B, rowFor('B2', puppet, B.instance.writerKey))
+    await sync(A, B)
+
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      rotated: true,
+      members: ['A', 'B'],
+      uncovered: []
+    })
+    // Without its masterTopic the second row is a stale copy, not a device.
+    await addDevice(B, {
+      ...rowFor('B3', puppet, B.instance.writerKey),
+      masterTopic: undefined
+    })
+    await sync(A, B)
+    expect((await A.store.status()).uncovered).toEqual([])
+  })
+
+  it('neither seals to nor reports a row whose writer the vault does not know', async () => {
+    const [A] = await setup(['A'])
+    const stranger = Buffer.alloc(32, 7)
+    await addDevice(A, rowFor('U', makeKeyPair(), stranger))
+    await addDevice(A, { id: 'V', writerKey: stranger.toString('hex') })
+    await addDevice(A, { ...rowFor('W', makeKeyPair()), writerKey: undefined })
+
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      rotated: true,
+      members: ['A'],
+      uncovered: []
+    })
+    expect(await A.store.status()).toMatchObject({
+      members: ['A'],
+      uncovered: []
+    })
+  })
+
   it('seals to a device whose id is __proto__ and then stays current', async () => {
     const [A] = await setup(['A'])
     const proto = makeKeyPair()
-    await addDevice(A, rowFor('__proto__', proto))
+    await addDevice(A, await strayRow(A, '__proto__', proto))
 
     expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
       rotated: true,
@@ -1201,9 +1323,9 @@ describe('epochStore over real Autopass', () => {
     expect(await revokedFor({ heldKey: false })).toBe(false)
     expect(await revokedFor({ wrote: false })).toBe(false)
     expect(await revokedFor({ inLatest: true })).toBe(false)
-    expect(await revokedFor({ myRow: (X) => rowFor('X', X.keyPair) })).toBe(
-      false
-    )
+    expect(
+      await revokedFor({ myRow: (X) => strayRow(X, 'X', X.keyPair) })
+    ).toBe(false)
     // My row without a masterTopic still names me by its writer key.
     expect(
       await revokedFor({
@@ -1520,7 +1642,7 @@ describe('epochStore over real Autopass', () => {
     await B.store.add('record/r', 'v')
     expect((await rawEnvelope(B, 'record/r')).e).toBe(newer)
 
-    await addDevice(A, rowFor('D', makeKeyPair()))
+    await addDevice(A, await strayRow(A, 'D'))
     expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
       rotated: true,
       seq: 3

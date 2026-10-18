@@ -143,31 +143,68 @@ export const createEpochStore = ({
     offered.get(epochId).add(key)
   }
 
-  // A row is the device its key names, and must say so in `id`: lib-vault
-  // lists and sweeps rows by `value.id`, so a row without it could not be
-  // kicked. Any other row is malformed: it is not sealed to, not an author,
-  // and not uncovered, so a planted row cannot stand in for a real device.
-  // Rows have no prototype, so a field the row lacks never comes from
-  // Object.prototype.
-  const readRoster = async () =>
-    (await readPrefix('device/'))
+  const isWriterKey = (key) =>
+    typeof key === 'string' && /^[0-9a-f]{64}$/i.test(key)
+
+  /**
+   * Well-formed `device/` rows. A row is the device its key names, and must
+   * say so in `id`: lib-vault lists and sweeps rows by `value.id`, so a row
+   * without it could not be kicked. Its `writerKey` must name a writer the
+   * vault holds, present and not removed: Autobase can order a removed
+   * writer's concurrent append before the removal, so a row a kicked device
+   * wrote offline survives the sweep. Each writer key counts for one
+   * masterTopic, the first in key order; a later row with another one is
+   * malformed. A malformed row is not sealed to, not an author, and not
+   * uncovered, so a planted row cannot stand in for a real device. Rows
+   * have no prototype, so a field the row lacks never comes from
+   * Object.prototype.
+   */
+  const readRoster = async () => {
+    const rows = (await readPrefix('device/'))
       .map(({ key, value }) => ({ id: key.slice('device/'.length), value }))
       .filter(
         ({ id, value }) =>
           isDeviceId(id) &&
           !!value &&
           typeof value === 'object' &&
-          value.id === id
+          value.id === id &&
+          isWriterKey(value.writerKey)
       )
-      .map(({ id, value }) =>
+    // One system lookup per writer key. Null for a writer it never added.
+    const active = new Map()
+    for (const { value } of rows) {
+      const writerKey = value.writerKey.toLowerCase()
+      if (active.has(writerKey)) continue
+      const info = await instance.base.system?.get(
+        Buffer.from(writerKey, 'hex')
+      )
+      active.set(writerKey, info?.isRemoved === false)
+    }
+    // writerKey -> the masterTopic its first row named.
+    const topics = new Map()
+    const kept = []
+    for (const { id, value } of rows) {
+      const writerKey = value.writerKey.toLowerCase()
+      if (!active.get(writerKey)) continue
+      // Anything but a usable key string counts as no masterTopic.
+      const masterTopic = canSealTo(value.masterTopic)
+        ? value.masterTopic
+        : undefined
+      if (masterTopic) {
+        const topic = masterTopic.toLowerCase()
+        if (!topics.has(writerKey)) topics.set(writerKey, topic)
+        else if (topics.get(writerKey) !== topic) continue
+      }
+      kept.push(
         Object.assign(Object.create(null), value, {
           id,
-          // Anything but a usable key string counts as no masterTopic.
-          masterTopic: canSealTo(value.masterTopic)
-            ? value.masterTopic
-            : undefined
+          writerKey,
+          masterTopic
         })
       )
+    }
+    return kept
+  }
 
   const verifyOnce = (record, { key, raw }) => {
     const cacheKey = `${key}:${record?.sig}`
