@@ -1413,6 +1413,49 @@ describe('appDeps module functions (excluding encryption)', () => {
       })
     })
 
+    test('pushes the status as it stands after a resumed migration', async () => {
+      vault.put('device/other', deviceRow('other', makeSignKeyPair()))
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      vault.put(
+        'record/r1',
+        JSON.stringify({ id: 'r1', type: 'note', data: { title: 'x' } })
+      )
+      vault.rows.delete('device/other')
+      await reopen({ writable: false })
+      const pushes = []
+      appDeps.setEpochStatusListener((status) => pushes.push(status))
+
+      // Armed once the reconcile ran, so the next vault-ext read is the
+      // resumed migration's: a device pairs and the epoch rotates then.
+      const instance = appDeps.getActiveVaultInstance()
+      let armed = false
+      const get = instance.get
+      instance.get = jest.fn(async (key) => {
+        if (armed && key === 'vault-ext') {
+          armed = false
+          vault.put('device/new', deviceRow('new', makeSignKeyPair()))
+          await appDeps.activeVaultEnsureEpoch({ start: false })
+        }
+        return get(key)
+      })
+      await appDeps.initListener({
+        vaultId: 'vault1',
+        onUpdate: () => {
+          armed = true
+        }
+      })
+      instance.base.writable = true
+      instance.emit('update')
+      await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+        seq: 3,
+        members: ['me', 'new']
+      })
+      expect(pushes.at(-1)).toMatchObject({ seq: 3, members: ['me', 'new'] })
+    })
+
     test('activeVaultAdd refuses to write under an epoch that still lists a removed device', async () => {
       vault.put('device/other', deviceRow('other', makeSignKeyPair()))
       await appDeps.activeVaultEnsureEpoch({ start: true })

@@ -560,11 +560,10 @@ const runEpochSync = async ({ ensure }) => {
     }
   }
   try {
-    const status = await store.status()
     if (
       migrationDeferred &&
+      (await store.status()).canRead &&
       store === epochStore &&
-      status.canRead &&
       activeVaultInstance?.base?.writable
     ) {
       // Cleared first, so a sync that lands meanwhile does not start a
@@ -573,6 +572,9 @@ const runEpochSync = async ({ ensure }) => {
       // runVaultMigration logs and records its own failure.
       await runVaultMigration().catch(() => {})
     }
+    // Read after the resume: a rotation the migration made, or one that
+    // landed meanwhile, is pushed now, not on the next update.
+    const status = await store.status()
     const {
       vaultId,
       epoch,
