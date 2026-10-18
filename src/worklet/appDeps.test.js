@@ -935,15 +935,20 @@ describe('appDeps module functions (excluding encryption)', () => {
       })
 
       const active = appDeps.getActiveVaultInstance()
-      const removeAllListenersSpy = jest.spyOn(active, 'removeAllListeners')
+      const removeListenerSpy = jest.spyOn(active, 'removeListener')
 
       const onUpdate = jest.fn()
       await appDeps.initListener({ vaultId: 'vault1', onUpdate })
 
-      removeAllListenersSpy.mockClear()
+      removeListenerSpy.mockClear()
 
       await appDeps.initListener({ vaultId: 'vault1', onUpdate })
-      expect(removeAllListenersSpy).not.toHaveBeenCalled()
+      expect(removeListenerSpy).not.toHaveBeenCalled()
+
+      active.emit('update')
+      await waitFor(() => onUpdate.mock.calls.length > 0)
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      expect(onUpdate).toHaveBeenCalledTimes(1)
     })
 
     test('initListener swaps its update listener when the vaultId changes', async () => {
