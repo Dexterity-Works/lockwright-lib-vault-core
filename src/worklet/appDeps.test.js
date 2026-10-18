@@ -945,6 +945,32 @@ describe('appDeps module functions (excluding encryption)', () => {
       await appDeps.initListener({ vaultId: 'vault1', onUpdate })
       expect(removeAllListenersSpy).not.toHaveBeenCalled()
     })
+
+    test('initListener swaps its update listener when the vaultId changes', async () => {
+      await appDeps.setStoragePath('/home/testuser/vaultdata')
+      await appDeps.masterVaultInit({
+        encryptionKey: 'key',
+        hashedPassword: 'pw'
+      })
+      await appDeps.initActiveVaultInstance({
+        id: 'vault1',
+        encryptionKey: 'key'
+      })
+
+      const active = appDeps.getActiveVaultInstance()
+      const onUpdate = jest.fn()
+      await appDeps.initListener({ vaultId: 'vault1', onUpdate })
+      const listeners = active.listenerCount('update')
+      await appDeps.initListener({ vaultId: 'vault2', onUpdate })
+      // The reconcile debounce folds a second handler's call into one, so
+      // the count is what shows a handler left behind.
+      expect(active.listenerCount('update')).toBe(listeners)
+
+      active.emit('update')
+      await waitFor(() => onUpdate.mock.calls.length > 0)
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      expect(onUpdate).toHaveBeenCalledTimes(1)
+    })
   })
 
   describe('closeAllInstances', () => {
