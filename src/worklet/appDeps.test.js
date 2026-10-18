@@ -272,7 +272,13 @@ import bareFs from 'bare-fs'
 import * as appDeps from './appDeps'
 import { buildEpochRecord, generateEpochId } from './epoch/epochRecord'
 import { isPlaintextKey } from './epoch/epochStore'
-import { generateEpochKey, sealCheck, sealRing } from './epoch/keyring'
+import {
+  EpochRotationPendingError,
+  generateEpochKey,
+  sealCheck,
+  sealRing,
+  writeErrorMessage
+} from './epoch/keyring'
 
 const mockSodium = require('sodium-native')
 
@@ -1649,6 +1655,36 @@ describe('appDeps module functions (excluding encryption)', () => {
       ).rejects.toThrow('Vault key must rotate first')
       expect(vault.rows.has('note/1')).toBe(false)
     })
+
+    test.each([
+      ['generateHotpNext', () => appDeps.generateHotpNext('r1')],
+      [
+        'addOtpToRecord',
+        () => appDeps.addOtpToRecord('r1', 'JBSWY3DPEHPK3PXP')
+      ],
+      ['removeOtpFromRecord', () => appDeps.removeOtpFromRecord('r1')]
+    ])(
+      '%s shows the rotation wording under an epoch that still lists a removed device',
+      async (_, write) => {
+        vault.put('device/other', deviceRow('other', makeSignKeyPair()))
+        await appDeps.activeVaultEnsureEpoch({ start: true })
+        await appDeps.activeVaultAdd('record/r1', {
+          id: 'r1',
+          type: 'note',
+          data: { title: 'x' }
+        })
+        await appDeps.addOtpToRecord(
+          'r1',
+          'otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP&counter=0'
+        )
+        vault.rows.delete('device/other')
+        appDeps.getActiveVaultInstance().base.writable = false
+
+        await expect(write()).rejects.toMatchObject({
+          message: writeErrorMessage(new EpochRotationPendingError())
+        })
+      }
+    )
 
     test('the update listener rotates when needed and pushes status only on change', async () => {
       const pushes = []

@@ -2070,6 +2070,19 @@ export const generateOtpCodesByIds = async (recordIds) => {
   return results
 }
 
+// Store errors reach the UI in writeErrorMessage's words, as in activeVaultAdd.
+const writeOtpRecord = async (recordId, record) => {
+  try {
+    await writeRecordV2AndProjectV1(
+      createActiveVaultAdapter(),
+      recordId,
+      record
+    )
+  } catch (error) {
+    throw new Error(writeErrorMessage(error))
+  }
+}
+
 /**
  * Generates the next HOTP code for a record and increments the counter.
  * @param {string} recordId
@@ -2095,7 +2108,7 @@ export const generateHotpNext = async (recordId) => {
 
   record.data.otp = { ...otp, counter: newCounter }
   record.updatedAt = Date.now()
-  await writeRecordV2AndProjectV1(createActiveVaultAdapter(), recordId, record)
+  await writeOtpRecord(recordId, record)
 
   return { code, counter: newCounter }
 }
@@ -2119,7 +2132,7 @@ export const addOtpToRecord = async (recordId, otpInput) => {
   const otpConfig = parseOtpInput(otpInput)
   record.data.otp = otpConfig
   record.updatedAt = Date.now()
-  await writeRecordV2AndProjectV1(createActiveVaultAdapter(), recordId, record)
+  await writeOtpRecord(recordId, record)
 }
 
 /**
@@ -2139,7 +2152,7 @@ export const removeOtpFromRecord = async (recordId) => {
 
   delete record.data.otp
   record.updatedAt = Date.now()
-  await writeRecordV2AndProjectV1(createActiveVaultAdapter(), recordId, record)
+  await writeOtpRecord(recordId, record)
 }
 
 /**
