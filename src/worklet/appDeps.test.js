@@ -1324,6 +1324,38 @@ describe('appDeps module functions (excluding encryption)', () => {
       })
     })
 
+    test('the merged list, the export and the duplicate check take v2 over a differing v1', async () => {
+      await appDeps.activeVaultAdd('record/r5', {
+        id: 'r5',
+        type: 'login',
+        data: {
+          title: 'new',
+          otp: { type: 'TOTP', secret: 'JBSWY3DPEHPK3PXP' }
+        }
+      })
+      vault.put(
+        'record/r5',
+        JSON.stringify({
+          id: 'r5',
+          type: 'login',
+          data: {
+            title: 'old',
+            otp: { type: 'TOTP', secret: 'JBSWY3DPEHPK3PXP' }
+          }
+        })
+      )
+
+      for (const filterKey of ['record/', 'record-v2/']) {
+        const list = await appDeps.activeVaultList(filterKey)
+        expect(list.map((record) => record.data.title)).toEqual(['new'])
+      }
+      const exported = await appDeps.exportOtpRecords()
+      expect(exported.map((record) => record.data.title)).toEqual(['new'])
+      expect(
+        await appDeps.findOtpDuplicates({ secret: 'JBSWY3DPEHPK3PXP' })
+      ).toEqual([{ id: 'r5', title: 'new' }])
+    })
+
     test('the migration leaves a record it cannot fully read alone', async () => {
       await appDeps.activeVaultEnsureEpoch({ start: true })
       vault.put(
