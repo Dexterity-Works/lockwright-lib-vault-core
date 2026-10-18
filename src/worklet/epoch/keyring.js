@@ -25,6 +25,18 @@ export class EpochRecordWriteError extends Error {
   }
 }
 
+/**
+ * @param {Error} error thrown by a write
+ * @returns {string} words the UI can show for an epoch error, else the
+ *   error's own message
+ */
+export const writeErrorMessage = (error) =>
+  error instanceof EpochKeyUnavailableError
+    ? 'Vault key not available yet: another device must rotate it'
+    : error instanceof EpochRotationPendingError
+      ? 'Vault key must rotate first: wait for a device that can rotate it'
+      : error.message
+
 export class EpochDecryptError extends Error {
   constructor(message = 'Epoch envelope failed to decrypt') {
     super(message)

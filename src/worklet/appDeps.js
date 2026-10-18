@@ -10,7 +10,8 @@ import sodium from 'sodium-native'
 import { createEpochStore } from './epoch/epochStore'
 import {
   EpochKeyUnavailableError,
-  EpochRotationPendingError
+  EpochRotationPendingError,
+  writeErrorMessage
 } from './epoch/keyring'
 import { getForbiddenRoots } from './getForbiddenRoots'
 import {
@@ -1082,13 +1083,7 @@ export const activeVaultAdd = async (key, data, file, fileName) => {
       }
     }
   } catch (error) {
-    const err = new Error(
-      error instanceof EpochKeyUnavailableError
-        ? 'Vault key not available yet: another device must rotate it'
-        : error instanceof EpochRotationPendingError
-          ? 'Vault key must rotate first: wait for a device that can rotate it'
-          : error.message
-    )
+    const err = new Error(writeErrorMessage(error))
     if (fileName) {
       err.details = { fileName }
     }
