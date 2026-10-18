@@ -1413,6 +1413,133 @@ describe('appDeps module functions (excluding encryption)', () => {
       })
     })
 
+    describe('the deferred migration resume', () => {
+      const v1Record = JSON.stringify({
+        id: 'r1',
+        type: 'note',
+        data: { title: 'x' }
+      })
+
+      // The epoch still lists a removed device and this device cannot
+      // write, so it cannot rotate first.
+      const deferOnRotation = async () => {
+        vault.put('device/other', deviceRow('other', makeSignKeyPair()))
+        await appDeps.activeVaultEnsureEpoch({ start: true })
+        vault.put('record/r1', v1Record)
+        vault.rows.delete('device/other')
+        await reopen({ writable: false })
+        expect(appDeps.getVaultMigrationStatus().deferred).toBe(true)
+      }
+
+      // The resume guard is what keeps these deferred: with nothing left
+      // to write, a resume would finish at once.
+      const stillDeferred = () =>
+        expect(appDeps.getVaultMigrationStatus()).toMatchObject({
+          ready: false,
+          deferred: true,
+          error: 'epoch-key-pending'
+        })
+
+      test('waits until this device can open the latest epoch', async () => {
+        const first = putForeignEpoch()
+        vault.put('record/r1', v1Record)
+        await reopen()
+        stillDeferred()
+        vault.rows.delete('record/r1')
+        const fireUpdate = await listen()
+
+        await fireUpdate()
+        stillDeferred()
+
+        putForeignEpoch(2, first, { withMe: true })
+        await fireUpdate()
+        await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+      })
+
+      test('waits until the vault is writable', async () => {
+        await deferOnRotation()
+        vault.rows.delete('record/r1')
+        const fireUpdate = await listen()
+
+        await fireUpdate()
+        stillDeferred()
+
+        appDeps.getActiveVaultInstance().base.writable = true
+        await fireUpdate()
+        await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+      })
+
+      test('runs once when a sync lands during a slow resume', async () => {
+        await deferOnRotation()
+        const instance = appDeps.getActiveVaultInstance()
+        let release
+        const gate = new Promise((resolve) => {
+          release = resolve
+        })
+        let extWrites = 0
+        const add = instance.add
+        instance.add = jest.fn(async (key, ...rest) => {
+          if (key === 'vault-ext') {
+            extWrites++
+            await gate
+          }
+          return add(key, ...rest)
+        })
+        const fireUpdate = await listen()
+        instance.base.writable = true
+
+        await fireUpdate()
+        expect(appDeps.getVaultMigrationStatus().inProgress).toBe(true)
+        await fireUpdate()
+        release()
+        await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+        await fireUpdate()
+
+        expect(extWrites).toBe(1)
+        expect(appDeps.getVaultMigrationStatus().lastResult).toMatchObject({
+          alreadyMigrated: false
+        })
+      })
+
+      test('skips a vault opened while the sync ran', async () => {
+        // This vault's sync waits in its rotation until vault2 is open.
+        const { local } = appDeps.getActiveVaultInstance().base
+        const { getUserData } = local
+        let release
+        const gate = new Promise((resolve) => {
+          release = resolve
+        })
+        local.getUserData = async function (key) {
+          await gate
+          return getUserData.call(this, key)
+        }
+        const fireUpdate = await listen()
+        await fireUpdate()
+
+        // vault2 defers for an epoch not sealed to this device.
+        await appDeps.closeActiveVaultInstance()
+        const make = Autopass.getMockImplementation()
+        Autopass.mockImplementationOnce((...args) => {
+          const instance = make(...args)
+          vault = useMemoryVault(instance)
+          vault.put('device/me', deviceRow('me', me))
+          putForeignEpoch()
+          vault.put('record/r1', v1Record)
+          return instance
+        })
+        await appDeps.initActiveVaultInstance({
+          id: 'vault2',
+          encryptionKey: 'key'
+        })
+        stillDeferred()
+        vault.rows.delete('record/r1')
+
+        release()
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        stillDeferred()
+      })
+    })
+
     test('pushes the status as it stands after a resumed migration', async () => {
       vault.put('device/other', deviceRow('other', makeSignKeyPair()))
       await appDeps.activeVaultEnsureEpoch({ start: true })
