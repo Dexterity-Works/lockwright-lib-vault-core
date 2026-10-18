@@ -1296,6 +1296,20 @@ describe('appDeps module functions (excluding encryption)', () => {
       expect(appDeps.getVaultMigrationStatus().ready).toBe(false)
     })
 
+    test('the migration does not copy a v1 file over a v2 file it cannot read', async () => {
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      await appDeps.activeVaultAdd(
+        'record/r1/file/f1',
+        { name: 'a.txt' },
+        Buffer.from('bytes')
+      )
+      vault.put('record-v2/r1/file/f1', unreadable)
+      await reopen()
+
+      expect(vault.rows.get('record-v2/r1/file/f1').value).toBe(unreadable)
+      expect(appDeps.getVaultMigrationStatus().ready).toBe(false)
+    })
+
     test('vaultRemove drops the v2 files of a record, readable or not', async () => {
       await appDeps.activeVaultEnsureEpoch({ start: true })
       await appDeps.activeVaultAdd('record/r1', {
