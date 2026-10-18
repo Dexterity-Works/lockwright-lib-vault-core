@@ -171,15 +171,19 @@ export const createEpochStore = ({
           isWriterKey(value.writerKey)
       )
     // One system lookup per writer key. Null for a writer it never added.
-    const active = new Map()
-    for (const { value } of rows) {
-      const writerKey = value.writerKey.toLowerCase()
-      if (active.has(writerKey)) continue
-      const info = await instance.base.system?.get(
-        Buffer.from(writerKey, 'hex')
+    const writerKeys = [
+      ...new Set(rows.map(({ value }) => value.writerKey.toLowerCase()))
+    ]
+    const active = new Map(
+      await Promise.all(
+        writerKeys.map(async (writerKey) => {
+          const info = await instance.base.system?.get(
+            Buffer.from(writerKey, 'hex')
+          )
+          return [writerKey, info?.isRemoved === false]
+        })
       )
-      active.set(writerKey, info?.isRemoved === false)
-    }
+    )
     // writerKey -> the masterTopic its first row named.
     const topics = new Map()
     const kept = []
