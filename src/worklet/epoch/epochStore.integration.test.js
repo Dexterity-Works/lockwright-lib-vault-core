@@ -1409,6 +1409,39 @@ describe('epochStore over real Autopass', () => {
     expect(await D.store.get('record/after')).toBeNull()
   })
 
+  it('settles members that keep rotating at once after a removal', async () => {
+    const [A, B, C] = await setup()
+    await A.store.ensureEpoch({ start: true })
+    await sync(A, B, C)
+    await A.store.remove('device/C')
+    await sync(A, B)
+
+    // Each round both run before either sees the other's epoch.
+    const rounds = []
+    for (let round = 0; round < 5; round++) {
+      const results = await Promise.all([
+        A.store.ensureEpoch({ start: false }),
+        B.store.ensureEpoch({ start: false })
+      ])
+      await sync(A, B)
+      rounds.push({
+        reasons: results.map((result) => result.reason ?? 'rotated'),
+        seq: (await A.store.status()).seq
+      })
+    }
+    expect(rounds[0].reasons).toEqual(['rotated', 'rotated'])
+    // The winner's author is current; the loser carries its own key once.
+    const settled = rounds.findIndex(({ reasons }) =>
+      reasons.every((reason) => reason === 'current')
+    )
+    expect(settled).toBeGreaterThan(0)
+    expect(settled).toBeLessThanOrEqual(2)
+    for (const { reasons, seq } of rounds.slice(settled)) {
+      expect(reasons).toEqual(['current', 'current'])
+      expect(seq).toBe(rounds[settled].seq)
+    }
+  })
+
   it('keeps vault-ext plaintext once an epoch exists', async () => {
     const [A, B, C] = await setup()
     await kick(A, C)

@@ -385,11 +385,22 @@ export const createEpochStore = ({
 
   // A key I hold that latest's box for me lacks: its author sealed a
   // partial ring (a chain restarted by a joiner, say), so the other members
-  // may lack it too.
-  const holdsMoreThan = (latest) => {
+  // may lack it too. Only keys of epochs I wrote, or whose author left,
+  // count: another current member carries its own. Otherwise both sides of
+  // a same-seq race hold the other's key and rotate forever.
+  const holdsMoreThan = (latest, keyPair) => {
     // openRing gives a box with no prototype.
     const box = openedBoxes.get(`${latest.id}:${latest.sig}`)
-    return Object.keys(ring).some((epochId) => box?.[epochId] !== ring[epochId])
+    const me = keyPair.publicKey.toString('hex')
+    const authors = new Set(
+      roster.flatMap((row) => row.masterTopic?.toLowerCase() ?? [])
+    )
+    return epochs.valid.some(
+      ({ id, by }) =>
+        Object.hasOwn(ring, id) &&
+        box?.[id] !== ring[id] &&
+        (by === me || !authors.has(by))
+    )
   }
 
   const isMe = (masterTopic, keyPair) =>
@@ -464,7 +475,7 @@ export const createEpochStore = ({
     if (!ring[latest.id]) return skip('pending')
     if (
       sameSet(memberPairs(latest), sealablePairs(sealable)) &&
-      !holdsMoreThan(latest)
+      !holdsMoreThan(latest, keyPair)
     ) {
       return skip('current')
     }
