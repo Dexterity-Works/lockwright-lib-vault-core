@@ -48,8 +48,9 @@ const refuseEpochKey = (key) => {
   }
 }
 
-// A lone surrogate would sort and sign as U+FFFD, so two ids could share
-// one place in the canonical member order.
+// A device id is a non-empty, well-formed string. Storage already turns a
+// lone surrogate in a row key into U+FFFD, so the surrogate check is extra
+// defence.
 const isDeviceId = (id) =>
   typeof id === 'string' && id.length > 0 && id.isWellFormed()
 
