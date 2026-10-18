@@ -482,17 +482,19 @@ const runIncrementalReconcile = async () => {
   const entries = await listing.listEntries()
   const adapter = { ...listing, listEntries: async () => entries }
   // A v1 record this device cannot read looks deleted; mirroring that
-  // would delete a v2 record it never saw change.
-  const blind = !canRead || listing.unreadableKeys.size > 0
+  // would delete a v2 record it never saw change. reconcileDualStore skips
+  // such records through skipIds; only a latest epoch it cannot open
+  // blocks every delete.
   const result = await reconcileDualStore(adapter, {
     previousV1Ids: previousV1RecordIds,
-    blockV1DeleteMirror: vaultExt.blockV1DeleteMirror === true || blind
+    blockV1DeleteMirror: vaultExt.blockV1DeleteMirror === true || !canRead
   })
-  // Keep the ids seen before, so a v1 delete made meanwhile is mirrored
-  // once this device can read every record again.
-  previousV1RecordIds = blind
-    ? new Set([...previousV1RecordIds, ...result.previousV1Ids])
-    : result.previousV1Ids
+  // Keep the ids seen before but skipped now, so a v1 delete made meanwhile
+  // is mirrored once this device can read the record again.
+  const kept = canRead
+    ? [...previousV1RecordIds].filter((id) => listing.skipIds.has(id))
+    : previousV1RecordIds
+  previousV1RecordIds = new Set([...result.previousV1Ids, ...kept])
 }
 
 const scheduleIncrementalReconcile = (after) => {

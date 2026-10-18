@@ -1634,6 +1634,33 @@ describe('appDeps module functions (excluding encryption)', () => {
         expect(vault.rows.has('record-v2/r1')).toBe(false)
       })
 
+      test('mirrors a v1 delete while another record is unreadable', async () => {
+        const fireUpdate = await seenRecord()
+        vault.put('record/r2', unreadable)
+        vault.rows.delete('record/r1')
+        await fireUpdate()
+
+        expect(vault.rows.has('record-v2/r1')).toBe(false)
+        expect(vault.rows.get('record/r2').value).toBe(unreadable)
+      })
+
+      test('forgets a mirrored v1 delete while another record is unreadable', async () => {
+        const fireUpdate = await seenRecord()
+        vault.put('record/r2', unreadable)
+        vault.rows.delete('record/r1')
+        vault.rows.delete('record-v2/r1')
+        await fireUpdate()
+
+        // The id comes back as a v2 record with no v1 row.
+        await appDeps.activeVaultAdd('record-v2/r1', {
+          ...v1,
+          schema: 2
+        })
+        vault.rows.delete('record/r1')
+        await fireUpdate()
+        expect(vault.rows.has('record-v2/r1')).toBe(true)
+      })
+
       test('mirrors a v1 delete while a rotation is owed and every key is held', async () => {
         const fireUpdate = await listen()
         putForeignEpoch(1, null, { withMe: true })
