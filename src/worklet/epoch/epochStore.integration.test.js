@@ -554,6 +554,40 @@ describe('epochStore over real Autopass', () => {
     expect(rivals).toHaveLength(2)
   })
 
+  it('rejects a write as pending when its rotation is overtaken twice', async () => {
+    const [A, B] = await setup()
+    await A.store.ensureEpoch({ start: true })
+    await A.store.remove('device/C')
+    // Each rival seals to X, outside the roster, so latest stays stale.
+    const rivals = rivalEach(A, B, 2, [
+      ['A', A.keyPair],
+      ['B', B.keyPair],
+      ['X', makeKeyPair()]
+    ])
+
+    await expect(A.store.add('record/r', 'v')).rejects.toThrow(
+      EpochRotationPendingError
+    )
+    expect(rivals).toHaveLength(2)
+    expect(await A.instance.get('record/r')).toBeNull()
+  })
+
+  it('writes under the winner when its rotation is overtaken twice', async () => {
+    const [A, B] = await setup()
+    await A.store.ensureEpoch({ start: true })
+    await A.store.remove('device/C')
+    // Each rival seals to the roster alone, so the last one is current.
+    const rivals = rivalEach(A, B, 2, [
+      ['A', A.keyPair],
+      ['B', B.keyPair]
+    ])
+
+    await A.store.add('record/r', 'v')
+    expect(rivals).toHaveLength(2)
+    expect((await rawEnvelope(A, 'record/r')).e).toBe(rivals[1].id)
+    expect(await value(A, 'record/r')).toBe('v')
+  })
+
   it('omits an envelope whose epoch id was edited', async () => {
     const [A, , C] = await setup()
     const first = await kick(A, C)

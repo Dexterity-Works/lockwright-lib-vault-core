@@ -51,6 +51,14 @@ const refuseEpochKey = (key) => {
 
 const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x))
 
+// A rotation whose retry was overtaken by another epoch too.
+class RotationOvertakenError extends Error {
+  constructor() {
+    super('Epoch rotation did not resolve as latest')
+    this.name = 'RotationOvertakenError'
+  }
+}
+
 /**
  * Adapter over an Autopass instance that encrypts values under the latest
  * membership epoch and decrypts with every epoch key this device can open.
@@ -292,7 +300,14 @@ export const createEpochStore = ({
       const canRotate =
         instance.base.writable &&
         coverage().sealable.some((row) => isMe(row.masterTopic, keyPair))
-      if (canRotate) await ensureEpoch({ start: true })
+      if (canRotate) {
+        try {
+          await ensureEpoch({ start: true })
+        } catch (error) {
+          // Whoever won may have left latest current: judge it below.
+          if (!(error instanceof RotationOvertakenError)) throw error
+        }
+      }
       if (isStale()) throw new EpochRotationPendingError()
     }
 
@@ -466,7 +481,7 @@ export const createEpochStore = ({
       const result = await rotate(sealable, uncovered, keyPair)
       if (result) return result
       // Another epoch resolved above the one just appended: judge that one.
-      if (retried) throw new Error('Epoch rotation did not resolve as latest')
+      if (retried) throw new RotationOvertakenError()
       return doEnsureEpoch({ start }, true)
     }
 
