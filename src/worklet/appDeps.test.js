@@ -1469,6 +1469,22 @@ describe('appDeps module functions (excluding encryption)', () => {
         await waitFor(() => appDeps.getVaultMigrationStatus().ready)
       })
 
+      test('defers again when the resume cannot rotate, then resumes later', async () => {
+        await deferOnRotation()
+        const myRow = vault.rows.get('device/me').value
+        vault.rows.delete('device/me')
+        const fireUpdate = await listen()
+        appDeps.getActiveVaultInstance().base.writable = true
+
+        // It can read and write but, without its row, not rotate.
+        await fireUpdate()
+        stillDeferred()
+
+        vault.put('device/me', myRow)
+        await fireUpdate()
+        await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+      })
+
       test('runs once when a sync lands during a slow resume', async () => {
         await deferOnRotation()
         const instance = appDeps.getActiveVaultInstance()
