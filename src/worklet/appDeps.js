@@ -389,6 +389,18 @@ const isUnreadableRow = async (key) => {
   return unreadable
 }
 
+/**
+ * The record for an id, v2 first. Null when its v2 row exists but cannot be
+ * read here: the v1 copy may be stale, and a write based on it would seal
+ * over v2 content this device never saw.
+ * @param {string} recordId
+ * @returns {Promise<{ record: object, key: string, schema: 1|2 }|null>}
+ */
+const getReadableRecord = async (recordId) => {
+  if (await isUnreadableRow(recordKeyV2(recordId))) return null
+  return getRawRecordPreferV2(createActiveVaultAdapter(), recordId)
+}
+
 const refreshPreviousV1RecordIds = async () => {
   const entries = await collectActiveVaultEntries(isV1RecordKey)
   previousV1RecordIds = new Set(
@@ -1999,8 +2011,7 @@ export const generateOtpCodesByIds = async (recordIds) => {
 
   for (const recordId of recordIds) {
     try {
-      const v2 = await activeVaultGetRaw(recordKeyV2(recordId))
-      const record = v2 || (await activeVaultGetRaw(recordKeyV1(recordId)))
+      const record = (await getReadableRecord(recordId))?.record
       if (!record?.data?.otp) continue
 
       const otp = record.data.otp
@@ -2032,8 +2043,7 @@ export const generateHotpNext = async (recordId) => {
     throw new Error('Vault not initialised')
   }
 
-  const v2 = await activeVaultGetRaw(recordKeyV2(recordId))
-  const record = v2 || (await activeVaultGetRaw(recordKeyV1(recordId)))
+  const record = (await getReadableRecord(recordId))?.record
   if (!record) {
     throw new Error('Record not found')
   }
@@ -2064,8 +2074,7 @@ export const addOtpToRecord = async (recordId, otpInput) => {
     throw new Error('Vault not initialised')
   }
 
-  const v2 = await activeVaultGetRaw(recordKeyV2(recordId))
-  const record = v2 || (await activeVaultGetRaw(recordKeyV1(recordId)))
+  const record = (await getReadableRecord(recordId))?.record
   if (!record?.data) {
     throw new Error('Record not found')
   }
@@ -2086,8 +2095,7 @@ export const removeOtpFromRecord = async (recordId) => {
     throw new Error('Vault not initialised')
   }
 
-  const v2 = await activeVaultGetRaw(recordKeyV2(recordId))
-  const record = v2 || (await activeVaultGetRaw(recordKeyV1(recordId)))
+  const record = (await getReadableRecord(recordId))?.record
   if (!record?.data) {
     throw new Error('Record not found')
   }

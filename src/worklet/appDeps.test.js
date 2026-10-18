@@ -1234,6 +1234,38 @@ describe('appDeps module functions (excluding encryption)', () => {
       expect(vault.rows.get('record-v2/r1').value).toBe(unreadable)
     })
 
+    describe('a record whose v2 row this device cannot read', () => {
+      beforeEach(async () => {
+        await appDeps.activeVaultEnsureEpoch({ start: true })
+        await appDeps.activeVaultAdd('record/r1', {
+          id: 'r1',
+          type: 'note',
+          data: { title: 'stale' }
+        })
+        await appDeps.addOtpToRecord(
+          'r1',
+          'otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP&counter=0'
+        )
+        vault.put('record-v2/r1', unreadable)
+      })
+
+      test.each([
+        ['generateHotpNext', () => appDeps.generateHotpNext('r1')],
+        [
+          'addOtpToRecord',
+          () => appDeps.addOtpToRecord('r1', 'JBSWY3DPEHPK3PXP')
+        ],
+        ['removeOtpFromRecord', () => appDeps.removeOtpFromRecord('r1')]
+      ])('%s leaves it alone', async (_, write) => {
+        await expect(write()).rejects.toThrow('Record not found')
+        expect(vault.rows.get('record-v2/r1').value).toBe(unreadable)
+      })
+
+      test('generateOtpCodesByIds gives no code from its v1 copy', async () => {
+        expect(await appDeps.generateOtpCodesByIds(['r1'])).toEqual([])
+      })
+    })
+
     test('the migration leaves a record it cannot fully read alone', async () => {
       await appDeps.activeVaultEnsureEpoch({ start: true })
       vault.put(
