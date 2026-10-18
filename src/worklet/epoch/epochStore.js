@@ -136,19 +136,21 @@ export const createEpochStore = ({
     offered.get(epochId).add(key)
   }
 
-  // A row is the device its key names. One whose value names another id is
-  // malformed: it is not sealed to, not an author, and not uncovered, so a
-  // planted row cannot stand in for a real device. Rows have no prototype,
-  // so a field the row lacks never comes from Object.prototype.
+  // A row is the device its key names, and must say so in `id`: lib-vault
+  // lists and sweeps rows by `value.id`, so a row without it could not be
+  // kicked. Any other row is malformed: it is not sealed to, not an author,
+  // and not uncovered, so a planted row cannot stand in for a real device.
+  // Rows have no prototype, so a field the row lacks never comes from
+  // Object.prototype.
   const readRoster = async () =>
     (await readPrefix('device/'))
       .map(({ key, value }) => ({ id: key.slice('device/'.length), value }))
       .filter(
         ({ id, value }) =>
           isDeviceId(id) &&
-          value &&
+          !!value &&
           typeof value === 'object' &&
-          (value.id === undefined || value.id === id)
+          value.id === id
       )
       .map(({ id, value }) =>
         Object.assign(Object.create(null), value, {

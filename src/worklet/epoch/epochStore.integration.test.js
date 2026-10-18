@@ -919,6 +919,30 @@ describe('epochStore over real Autopass', () => {
     })
   })
 
+  it('never seals to a roster row without an id', async () => {
+    const [A, B, C] = await setup()
+    // lib-vault lists and sweeps rows by value.id, so a kick of C leaves
+    // this row in place.
+    await C.instance.add(
+      'device/Z',
+      JSON.stringify({
+        masterTopic: C.keyPair.publicKey.toString('hex'),
+        writerKey: C.instance.writerKey.toString('hex')
+      })
+    )
+    await sync(A, B, C)
+
+    expect(await kick(A, C)).toMatchObject({
+      rotated: true,
+      members: ['A', 'B'],
+      uncovered: []
+    })
+    await A.store.add('record/after', 'v')
+    await sync(A, B, C)
+    expect(await value(B, 'record/after')).toBe('v')
+    expect(await C.store.get('record/after')).toBeNull()
+  })
+
   it('seals to a device whose id is __proto__ and then stays current', async () => {
     const [A] = await setup(['A'])
     const proto = makeKeyPair()
