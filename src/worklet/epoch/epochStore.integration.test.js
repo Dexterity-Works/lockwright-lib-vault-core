@@ -957,6 +957,26 @@ describe('epochStore over real Autopass', () => {
     }
   })
 
+  it('reads while a rotation is owed only when it holds every epoch key', async () => {
+    const [A, B, C] = await setup()
+    await C.store.ensureEpoch({ start: true })
+    await sync(A, B, C)
+    const D = await makePeer('D', A)
+    await A.instance.addWriter(D.instance.writerKey)
+    await A.store.remove('device/C')
+    await sync(A, B, D)
+
+    expect(await B.store.status()).toMatchObject({
+      epoch: null,
+      legacy: false,
+      canRead: true
+    })
+    expect(await D.store.status()).toMatchObject({
+      epoch: null,
+      canRead: false
+    })
+  })
+
   it('refuses add and remove on epoch keys', async () => {
     const [A] = await setup(['A'])
     const { id } = await A.store.ensureEpoch({ start: true })

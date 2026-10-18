@@ -1128,21 +1128,28 @@ describe('appDeps module functions (excluding encryption)', () => {
     })
 
     // A rostered device `other` writes epoch `seq` after `prev`, sealed to
-    // itself only.
-    const putForeignEpoch = (seq = 1, prev = null) => {
+    // itself only, or to me as well.
+    const putForeignEpoch = (seq = 1, prev = null, { withMe = false } = {}) => {
       const other = makeSignKeyPair()
-      const topic = other.publicKey.toString('hex')
+      const rows = [
+        { id: 'other', masterTopic: other.publicKey.toString('hex') }
+      ]
+      if (withMe)
+        rows.push({ id: 'me', masterTopic: me.publicKey.toString('hex') })
       vault.put('device/other', deviceRow('other', other))
       const id = generateEpochId()
       const key = generateEpochKey()
-      const box = sealRing({ [id]: key }, [
-        { id: 'other', masterTopic: topic }
-      ]).other
+      const boxes = sealRing({ [id]: key }, rows)
       const record = buildEpochRecord({
         id,
         seq,
         prev,
-        members: { other: { topic, box } },
+        members: Object.fromEntries(
+          rows.map((row) => [
+            row.id,
+            { topic: row.masterTopic, box: boxes[row.id] }
+          ])
+        ),
         check: sealCheck(key),
         personalKeyPair: other
       })
@@ -1535,6 +1542,24 @@ describe('appDeps module functions (excluding encryption)', () => {
         vault.rows.delete('record/r1')
         await fireUpdate()
 
+        expect(vault.rows.has('record-v2/r1')).toBe(false)
+      })
+
+      test('mirrors a v1 delete while a rotation is owed and every key is held', async () => {
+        const fireUpdate = await listen()
+        putForeignEpoch(1, null, { withMe: true })
+        await appDeps.activeVaultAdd('record/r1', v1)
+        await fireUpdate()
+        // The only author leaves, and this device cannot rotate yet.
+        vault.rows.delete('device/other')
+        appDeps.getActiveVaultInstance().base.writable = false
+        vault.rows.delete('record/r1')
+        await fireUpdate()
+
+        expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+          epoch: null,
+          canRead: true
+        })
         expect(vault.rows.has('record-v2/r1')).toBe(false)
       })
 

@@ -552,8 +552,12 @@ export const createEpochStore = ({
   const status = async () => {
     await ensureFresh()
     const keyPair = await getPersonalKeyPair()
-    const { latest } = epochs
-    const canRead = legacy || (!!latest && !!ring[latest.id])
+    const { latest, valid } = epochs
+    // While a rotation is owed there is no latest to open: every record is
+    // readable once the ring opens every epoch there is.
+    const canRead =
+      legacy ||
+      (latest ? !!ring[latest.id] : valid.every((record) => ring[record.id]))
     return {
       vaultId,
       epoch: latest ? latest.id : null,
