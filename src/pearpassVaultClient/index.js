@@ -398,10 +398,12 @@ export class PearpassVaultClient extends EventEmitter {
   }
 
   /**
-   * Schema-2 migrate status for the active vault (boot gate).
+   * Schema-2 migrate status for the active vault (boot gate). `deferred`:
+   * waiting until this device can write the vault epoch; not an error.
    * @returns {Promise<{
    *   ready: boolean,
    *   inProgress: boolean,
+   *   deferred: boolean,
    *   migratedToSchema: number|null,
    *   error: string|null,
    *   lastResult: object|null

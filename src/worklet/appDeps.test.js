@@ -1330,6 +1330,32 @@ describe('appDeps module functions (excluding encryption)', () => {
       expect(vault.rows.has('record-v2/r1')).toBe(false)
     })
 
+    test('resumes a deferred migration once the vault can write and read', async () => {
+      vault.put('device/other', deviceRow('other', makeSignKeyPair()))
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      vault.put(
+        'record/r1',
+        JSON.stringify({ id: 'r1', type: 'note', data: { title: 'x' } })
+      )
+      vault.rows.delete('device/other')
+      await reopen({ writable: false })
+      expect(appDeps.getVaultMigrationStatus()).toMatchObject({
+        ready: false,
+        deferred: true,
+        error: null
+      })
+
+      const fireUpdate = await listen()
+      appDeps.getActiveVaultInstance().base.writable = true
+      await fireUpdate()
+      await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+      expect(appDeps.getVaultMigrationStatus()).toMatchObject({
+        deferred: false,
+        error: null,
+        migratedToSchema: 2
+      })
+    })
+
     test('activeVaultAdd refuses to write under an epoch that still lists a removed device', async () => {
       vault.put('device/other', deviceRow('other', makeSignKeyPair()))
       await appDeps.activeVaultEnsureEpoch({ start: true })

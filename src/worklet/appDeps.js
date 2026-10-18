@@ -84,15 +84,19 @@ let lastActiveVaultId = null
 let lastActiveVaultEncryptionKey = null
 let lastOnUpdateCallback = null
 
-/** @type {{ ready: boolean, inProgress: boolean, migratedToSchema: number|null, error: string|null, lastResult: object|null, progress: { done: number, total: number }|null }} */
+/** @type {{ ready: boolean, inProgress: boolean, deferred: boolean, migratedToSchema: number|null, error: string|null, lastResult: object|null, progress: { done: number, total: number }|null }} */
 let vaultMigrationStatus = {
   ready: false,
   inProgress: false,
+  deferred: false,
   migratedToSchema: null,
   error: null,
   lastResult: null,
   progress: null
 }
+// The migration waits for this device to write the epoch: runEpochSync
+// runs it again once it can.
+let migrationDeferred = false
 
 /** @type {Set<string>} */
 let previousV1RecordIds = new Set()
@@ -114,7 +118,8 @@ const rateLimiter = new RateLimiter()
 
 /**
  * UI can wait on migrate completeness before listing records.
- * @returns {{ ready: boolean, inProgress: boolean, migratedToSchema: number|null, error: string|null, lastResult: object|null, progress: { done: number, total: number }|null }}
+ * `deferred`: waiting until this device can write the epoch; not an error.
+ * @returns {{ ready: boolean, inProgress: boolean, deferred: boolean, migratedToSchema: number|null, error: string|null, lastResult: object|null, progress: { done: number, total: number }|null }}
  */
 export const getVaultMigrationStatus = () => ({ ...vaultMigrationStatus })
 
@@ -249,9 +254,11 @@ export const closeActiveVaultInstance = async (options) => {
   // reset listener marker so future initListener can rebind
   listeningVaultId = null
   previousV1RecordIds = new Set()
+  migrationDeferred = false
   vaultMigrationStatus = {
     ready: false,
     inProgress: false,
+    deferred: false,
     migratedToSchema: null,
     error: null,
     lastResult: null,
@@ -413,6 +420,7 @@ const runVaultMigration = async () => {
     ...vaultMigrationStatus,
     ready: false,
     inProgress: true,
+    deferred: false,
     error: null
   }
 
@@ -432,6 +440,7 @@ const runVaultMigration = async () => {
     vaultMigrationStatus = {
       ready: result.complete || result.alreadyMigrated,
       inProgress: false,
+      deferred: false,
       migratedToSchema:
         Number(vaultExt.migratedToSchema) >= SCHEMA_V2
           ? SCHEMA_V2
@@ -444,12 +453,20 @@ const runVaultMigration = async () => {
       progress: vaultMigrationStatus.progress
     }
   } catch (error) {
-    workletLogger.error('runVaultMigration failed', error)
+    // A device not yet in the latest epoch, or one that cannot rotate an
+    // epoch that still lists a removed device, cannot write yet.
+    migrationDeferred =
+      error instanceof EpochKeyUnavailableError ||
+      error instanceof EpochRotationPendingError
+    if (!migrationDeferred) {
+      workletLogger.error('runVaultMigration failed', error)
+    }
     vaultMigrationStatus = {
       ready: false,
       inProgress: false,
+      deferred: migrationDeferred,
       migratedToSchema: null,
-      error: error?.message || String(error),
+      error: migrationDeferred ? null : error?.message || String(error),
       lastResult: null
     }
     throw error
@@ -509,6 +526,18 @@ const runEpochSync = async ({ ensure }) => {
   }
   try {
     const status = await store.status()
+    if (
+      migrationDeferred &&
+      store === epochStore &&
+      status.canRead &&
+      activeVaultInstance?.base?.writable
+    ) {
+      // Cleared first, so a sync that lands meanwhile does not start a
+      // second run.
+      migrationDeferred = false
+      // runVaultMigration logs and records its own failure.
+      await runVaultMigration().catch(() => {})
+    }
     const {
       vaultId,
       epoch,
@@ -784,15 +813,9 @@ export const initActiveVaultInstance = async ({ id, encryptionKey }) => {
     try {
       await runVaultMigration()
     } catch (error) {
-      // A device not yet in the latest epoch, or one that cannot rotate an
-      // epoch that still lists a removed device, cannot write; open anyway
-      // so it can show its epoch status. Migration reruns on the next open.
-      if (
-        !(error instanceof EpochKeyUnavailableError) &&
-        !(error instanceof EpochRotationPendingError)
-      ) {
-        throw error
-      }
+      // Open anyway so the device can show its epoch status; runEpochSync
+      // runs the migration again once it can write.
+      if (!migrationDeferred) throw error
       workletLogger.warn('vault migration deferred: cannot write the epoch', {
         error: error.name
       })
