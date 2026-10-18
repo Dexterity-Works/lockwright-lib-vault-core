@@ -1539,6 +1539,46 @@ describe('epochStore over real Autopass', () => {
     }
   })
 
+  it('settles three members that keep rotating at once', async () => {
+    const [A, B, C, D] = await setup(['A', 'B', 'C', 'D'])
+    await A.store.ensureEpoch({ start: true })
+    await sync(A, B, C, D)
+    await A.store.remove('device/D')
+    await sync(A, B, C)
+    const group = [A, B, C]
+
+    // Each round all three run before any sees the others' epochs. After
+    // the first, each writes under its own epoch.
+    const rounds = []
+    for (let round = 0; round < 6; round++) {
+      const results = await Promise.all(
+        group.map((peer) => peer.store.ensureEpoch({ start: false }))
+      )
+      if (round === 0) {
+        for (const peer of group) {
+          await peer.store.add(`record/${peer.id}`, peer.id)
+        }
+      }
+      await sync(...group)
+      rounds.push({
+        reasons: results.map((result) => result.reason ?? 'rotated'),
+        seq: (await A.store.status()).seq
+      })
+    }
+    expect(rounds[0].reasons).toEqual(['rotated', 'rotated', 'rotated'])
+    // Each round drops its winner: two losers, then one.
+    const rotations = rounds.map(
+      ({ reasons }) => reasons.filter((reason) => reason === 'rotated').length
+    )
+    expect(rotations).toEqual([3, 2, 1, 0, 0, 0])
+    expect(new Set(rounds.slice(3).map(({ seq }) => seq)).size).toBe(1)
+    for (const peer of group) {
+      for (const writer of group) {
+        expect(await value(peer, `record/${writer.id}`)).toBe(writer.id)
+      }
+    }
+  })
+
   it('keeps vault-ext plaintext once an epoch exists', async () => {
     const [A, B, C] = await setup()
     await kick(A, C)
