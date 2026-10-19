@@ -1357,6 +1357,88 @@ describe('epochStore over real Autopass', () => {
     ).toBeTruthy()
   })
 
+  it('writes my unsigned row once per state when it cannot sign it', async () => {
+    const [, B] = await setup(['A', 'B'])
+    await addDevice(B, rowFor('B', B.keyPair, B.instance.writerKey))
+    // Without the vault key no row signs or verifies.
+    const { key } = B.instance.base
+    B.instance.base.key = null
+    const add = jest.spyOn(B.instance, 'add')
+    try {
+      await B.store.ensureEpoch({ start: false })
+      await B.store.ensureEpoch({ start: false })
+    } finally {
+      B.instance.base.key = key
+    }
+    expect(add.mock.calls.map(([k]) => k)).toEqual(['device/B'])
+  })
+
+  it('stores my own row unsigned while the base is not writable', async () => {
+    const [, B] = await setup(['A', 'B'])
+    // Appends still go through; only the store's writable check says no.
+    Object.defineProperty(B.instance.base, 'writable', {
+      value: false,
+      configurable: true
+    })
+    try {
+      await B.store.add(
+        'device/B',
+        JSON.stringify(rowFor('B', B.keyPair, B.instance.writerKey))
+      )
+    } finally {
+      delete B.instance.base.writable
+    }
+    const row = JSON.parse((await B.instance.get('device/B')).value)
+    expect(row.sig).toBeUndefined()
+    expect(row.writerPublicKey).toBeUndefined()
+  })
+
+  it('never re-signs a row with my masterTopic under another writer key', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    await addDevice(B, rowFor('B2', B.keyPair, A.instance.writerKey))
+    const add = jest.spyOn(B.instance, 'add')
+    await B.store.ensureEpoch({ start: false })
+    expect(add).not.toHaveBeenCalled()
+  })
+
+  it('rotates for a key whose author has only an unbound row', async () => {
+    const [A] = await setup(['A'])
+    const O = makeKeyPair()
+    await addDevice(A, { ...rowFor('O', O), writerKey: undefined })
+    // O's epoch gave A a key; A's latest box lacks it and seals to no device
+    // O's did not, so only O's unbound row makes the key A's to carry.
+    const e1 = '01'.repeat(16)
+    const e2 = '02'.repeat(16)
+    const records = [
+      epochBy(O, {
+        id: e1,
+        seq: 1,
+        ring: { [e1]: generateEpochKey() },
+        to: [
+          ['A', A.keyPair],
+          ['O', O]
+        ]
+      }),
+      epochBy(A.keyPair, {
+        id: e2,
+        seq: 2,
+        prev: e1,
+        ring: { [e2]: generateEpochKey() },
+        to: [['A', A.keyPair]]
+      })
+    ]
+    for (const record of records) {
+      await A.instance.add(`epoch/${record.id}`, JSON.stringify(record))
+    }
+
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      seq: 3,
+      members: ['A'],
+      uncovered: ['O']
+    })
+  })
+
   it('seals to a device whose id is __proto__ and then stays current', async () => {
     const [A] = await setup(['A'])
     const proto = makeKeyPair()
