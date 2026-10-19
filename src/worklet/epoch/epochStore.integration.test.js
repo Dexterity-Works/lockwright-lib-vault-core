@@ -17,7 +17,8 @@ import {
   openRing,
   sealCheck,
   sealRing,
-  signDeviceRow
+  signDeviceRow,
+  verifyDeviceRow
 } from './keyring.js'
 
 jest.setTimeout(60000)
@@ -1229,6 +1230,15 @@ describe('epochStore over real Autopass', () => {
       members: ['A'],
       uncovered: ['N', 'U', 'V', 'W']
     })
+  })
+
+  it('binds a row my writer signs, its core key hashing from its key pair', async () => {
+    const A = await makePeer('A')
+    const { local } = A.instance.base
+    expect(Hypercore.key(local.keyPair.publicKey)).toEqual(local.key)
+    expect(verifyDeviceRow(A.row, A.instance.base.key.toString('hex'))).toBe(
+      true
+    )
   })
 
   it('binds my row when my writer core uses manifest version 2', async () => {

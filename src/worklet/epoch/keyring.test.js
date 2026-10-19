@@ -249,7 +249,7 @@ describe('device row signature', () => {
   const writerKey = Hypercore.key(writer.publicKey).toString('hex')
 
   // Signs the message as verifyDeviceRow rebuilds it, whatever the fields.
-  const signedRow = (fields) => {
+  const signedRow = (fields, signer = writer) => {
     const row = {
       id: 'A',
       masterTopic: keyPair().publicKey.toString('hex'),
@@ -262,7 +262,7 @@ describe('device row signature', () => {
         JSON.stringify([vaultKeyHex, row.id, row.masterTopic, row.writerKey])
     )
     const sig = Buffer.alloc(sodium.crypto_sign_BYTES)
-    sodium.crypto_sign_detached(sig, message, writer.secretKey)
+    sodium.crypto_sign_detached(sig, message, signer.secretKey)
     return { ...row, sig: sig.toString('hex') }
   }
 
@@ -274,6 +274,77 @@ describe('device row signature', () => {
     expect(verifyDeviceRow(upper, vaultKeyHex)).toBe(false)
     expect(
       signDeviceRow({ secretKey: writer.secretKey, vaultKeyHex, ...upper })
+    ).toBeNull()
+  })
+
+  const row = signedRow({})
+  const other = keyPair()
+  const otherVault = 'cd'.repeat(32)
+
+  it('verifies a row signDeviceRow signed', () => {
+    const sig = signDeviceRow({
+      secretKey: writer.secretKey,
+      vaultKeyHex,
+      ...row
+    })
+    expect(sig).toBe(row.sig)
+    expect(verifyDeviceRow({ ...row, sig }, vaultKeyHex)).toBe(true)
+  })
+
+  it.each([
+    ['replayed under another id', { ...row, id: 'B' }, vaultKeyHex],
+    ['replayed in another vault', row, otherVault],
+    ['an uppercase sig', { ...row, sig: row.sig.toUpperCase() }, vaultKeyHex],
+    ['a short sig', { ...row, sig: row.sig.slice(2) }, vaultKeyHex],
+    ['a sig that is not a string', { ...row, sig: 7 }, vaultKeyHex],
+    [
+      'an uppercase writerPublicKey',
+      { ...row, writerPublicKey: row.writerPublicKey.toUpperCase() },
+      vaultKeyHex
+    ],
+    [
+      'a short writerPublicKey',
+      { ...row, writerPublicKey: row.writerPublicKey.slice(2) },
+      vaultKeyHex
+    ],
+    [
+      'a row signed by a key that does not hash to writerKey',
+      signedRow({ writerPublicKey: other.publicKey.toString('hex') }, other),
+      vaultKeyHex
+    ],
+    ['no row', null, vaultKeyHex],
+    ['a string row', JSON.stringify(row), vaultKeyHex],
+    ['a number row', 42, vaultKeyHex],
+    ['an array row', [row], vaultKeyHex],
+    ['no vault key', row, undefined],
+    ['an uppercase vault key', row, vaultKeyHex.toUpperCase()],
+    ['a short vault key', row, vaultKeyHex.slice(2)],
+    ['a Buffer vault key', row, Buffer.from(vaultKeyHex, 'hex')]
+  ])('does not verify %s', (_, candidate, vaultKey) => {
+    expect(verifyDeviceRow(candidate, vaultKey)).toBe(false)
+  })
+
+  it.each([
+    [
+      'a hex string secret key',
+      { secretKey: writer.secretKey.toString('hex') }
+    ],
+    ['a 32-byte secret key', { secretKey: writer.secretKey.subarray(0, 32) }],
+    ['no secret key', { secretKey: undefined }],
+    ['no vault key', { vaultKeyHex: undefined }],
+    ['an uppercase vault key', { vaultKeyHex: vaultKeyHex.toUpperCase() }],
+    ['a Buffer vault key', { vaultKeyHex: Buffer.from(vaultKeyHex, 'hex') }],
+    ['an id that is not a string', { id: 1 }],
+    ['no masterTopic', { masterTopic: undefined }],
+    ['an uppercase writerKey', { writerKey: writerKey.toUpperCase() }]
+  ])('signs nothing for %s', (_, fields) => {
+    expect(
+      signDeviceRow({
+        secretKey: writer.secretKey,
+        vaultKeyHex,
+        ...row,
+        ...fields
+      })
     ).toBeNull()
   })
 })
