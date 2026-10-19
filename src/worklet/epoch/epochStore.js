@@ -162,8 +162,10 @@ export const createEpochStore = ({
    * order a removed writer's concurrent append before the removal, so only a
    * bound row is sealed to or counts as an author. An unbound row is
    * uncovered: an older build's unsigned row, or one a kicked device planted
-   * under its own or another writer key. Rows have no prototype, so a field
-   * the row lacks never comes from Object.prototype.
+   * under its own or another writer key. A row whose writer was removed is
+   * `removed`: it can never bind again, so it is not uncovered either. Rows
+   * have no prototype, so a field the row lacks never comes from
+   * Object.prototype.
    */
   const readRoster = async () => {
     const rows = (await readPrefix('device/'))
@@ -179,17 +181,18 @@ export const createEpochStore = ({
           typeof value === 'object' &&
           value.id === id
       )
-    // One system lookup per writer key. Null for a writer it never added.
+    // One system lookup per writer key: whether it is removed, or null for
+    // a writer the system never added.
     const writerKeys = [
       ...new Set(rows.map(({ value }) => value.writerKey).filter(isWriterKey))
     ]
-    const active = new Map(
+    const removed = new Map(
       await Promise.all(
         writerKeys.map(async (writerKey) => {
           const info = await instance.base.system?.get(
             Buffer.from(writerKey, 'hex')
           )
-          return [writerKey, info?.isRemoved === false]
+          return [writerKey, info ? info.isRemoved === true : null]
         })
       )
     )
@@ -202,7 +205,8 @@ export const createEpochStore = ({
         masterTopic: canSealTo(value.masterTopic)
           ? value.masterTopic
           : undefined,
-        bound: signed && active.get(value.writerKey) === true,
+        bound: signed && removed.get(value.writerKey) === false,
+        removed: removed.get(value.writerKey) === true,
         signed,
         raw
       })
@@ -461,9 +465,13 @@ export const createEpochStore = ({
     }
     // An unsealable row that shares a writer with a sealable row is a stale
     // copy of a device that already has a key, or a row planted under a
-    // member's writer key.
+    // member's writer key. A removed writer's row is not listed: a kicked
+    // device could put a name of its choosing into every later warning.
     const uncovered = rest
-      .filter((row) => !row.writerKey || !sealedWriters.has(row.writerKey))
+      .filter(
+        (row) =>
+          !row.removed && (!row.writerKey || !sealedWriters.has(row.writerKey))
+      )
       .map((row) => row.id)
     return { sealable: [...sealable.values()], uncovered }
   }

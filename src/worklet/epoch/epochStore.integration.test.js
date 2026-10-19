@@ -297,7 +297,8 @@ const plantDuringKick = async (plant) => {
     expect(await C.store.get('record/after')).toBeNull()
     const { members, uncovered } = await A.store.status()
     expect(members).toEqual(['A', 'B'])
-    expect(planted).toEqual(expect.arrayContaining(uncovered))
+    // A planted row shares a member's writer key or names C's removed one.
+    expect(uncovered).toEqual([])
     for (const peer of peers.splice(0)) {
       await peer.instance.close()
       await peer.corestore.close()
