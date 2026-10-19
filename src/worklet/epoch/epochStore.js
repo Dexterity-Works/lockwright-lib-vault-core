@@ -163,9 +163,11 @@ export const createEpochStore = ({
    * bound row is sealed to or counts as an author. An unbound row is
    * uncovered: an older build's unsigned row, or one a kicked device planted
    * under its own or another writer key. A row whose writer was removed is
-   * `removed`: it can never bind again, so it is not uncovered either. Rows
-   * have no prototype, so a field the row lacks never comes from
-   * Object.prototype.
+   * `removed`: it is not bound while its writer stays removed, and a writer
+   * added again binds again, so it is not uncovered either. Residual: a
+   * planted row with no writerKey or an unknown one is still listed as
+   * uncovered under the name it carries. Rows have no prototype, so a field
+   * the row lacks never comes from Object.prototype.
    */
   const readRoster = async () => {
     const rows = (await readPrefix('device/'))
