@@ -591,12 +591,15 @@ export const createEpochStore = ({
       resigned.add(state)
       try {
         await instance.add(key, signRow(key, row.raw))
+        wrote = true
       } catch (error) {
-        // Not written: the next run tries again.
+        // Not written: the next run tries again. The run goes on, so one row
+        // that cannot be written never blocks a rotation.
         resigned.delete(state)
-        throw error
+        logger.warn('epochStore: could not re-sign my roster row', {
+          error: error?.name
+        })
       }
-      wrote = true
     }
     return wrote
   }

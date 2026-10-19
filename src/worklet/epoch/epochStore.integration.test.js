@@ -1377,13 +1377,34 @@ describe('epochStore over real Autopass', () => {
       .spyOn(B.instance, 'add')
       .mockRejectedValueOnce(new Error('append failed'))
 
-    await expect(B.store.ensureEpoch({ start: false })).rejects.toThrow(
-      'append failed'
-    )
-    await B.store.ensureEpoch({ start: false })
-    expect(
+    const sig = async () =>
       JSON.parse((await B.instance.get('device/B')).value).sig
-    ).toBeTruthy()
+    await B.store.ensureEpoch({ start: false })
+    expect(await sig()).toBeUndefined()
+    await B.store.ensureEpoch({ start: false })
+    expect(await sig()).toBeTruthy()
+  })
+
+  it('rotates while a re-sign of my other row keeps failing', async () => {
+    const [, B] = await setup(['A', 'B'])
+    await addDevice(B, rowFor('B2', B.keyPair, B.instance.writerKey))
+    const add = B.instance.add.bind(B.instance)
+    jest
+      .spyOn(B.instance, 'add')
+      .mockImplementation((key, ...rest) =>
+        key === 'device/B2'
+          ? Promise.reject(new Error('append failed'))
+          : add(key, ...rest)
+      )
+
+    expect(await B.store.ensureEpoch({ start: true })).toMatchObject({
+      rotated: true,
+      members: ['A', 'B']
+    })
+    expect(B.logger.warn).toHaveBeenCalledWith(
+      'epochStore: could not re-sign my roster row',
+      { error: 'Error' }
+    )
   })
 
   it('writes my unsigned row once per state when it cannot sign it', async () => {
