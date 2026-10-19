@@ -367,13 +367,12 @@ const isLowerHex = (value, length) =>
   value.length === length &&
   /^[0-9a-f]+$/.test(value)
 
-// Null when a field has the wrong shape. The masterTopic is signed as the
-// row spells it.
+// Null when a field has the wrong shape. Every hex field is lowercase, so
+// one key has one spelling and binds one row.
 const deviceRowMessage = ({ vaultKeyHex, id, masterTopic, writerKey }) =>
   isLowerHex(vaultKeyHex, 64) &&
   typeof id === 'string' &&
-  typeof masterTopic === 'string' &&
-  MASTER_TOPIC.test(masterTopic) &&
+  isLowerHex(masterTopic, 64) &&
   isLowerHex(writerKey, 64)
     ? Buffer.from(
         DEVICE_ROW_CONSTANT +

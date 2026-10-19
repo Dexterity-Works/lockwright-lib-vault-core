@@ -1,7 +1,9 @@
+import Hypercore from 'hypercore'
 import sodium from 'sodium-native'
 
 import {
   canSealTo,
+  DEVICE_ROW_CONSTANT,
   EpochDecryptError,
   EpochKeyUnavailableError,
   decryptValue,
@@ -11,7 +13,9 @@ import {
   openRing,
   opensCheck,
   sealCheck,
-  sealRing
+  sealRing,
+  signDeviceRow,
+  verifyDeviceRow
 } from './keyring.js'
 
 const keyPair = () => {
@@ -236,5 +240,40 @@ describe('keyring', () => {
     expect(openRing(sealAs(null, a), a)).toBeNull()
     expect(openRing(123, a)).toBeNull()
     expect(openRing(Buffer.alloc(8).toString('base64'), a)).toBeNull()
+  })
+})
+
+describe('device row signature', () => {
+  const writer = keyPair()
+  const vaultKeyHex = 'ab'.repeat(32)
+  const writerKey = Hypercore.key(writer.publicKey).toString('hex')
+
+  // Signs the message as verifyDeviceRow rebuilds it, whatever the fields.
+  const signedRow = (fields) => {
+    const row = {
+      id: 'A',
+      masterTopic: keyPair().publicKey.toString('hex'),
+      writerKey,
+      writerPublicKey: writer.publicKey.toString('hex'),
+      ...fields
+    }
+    const message = Buffer.from(
+      DEVICE_ROW_CONSTANT +
+        JSON.stringify([vaultKeyHex, row.id, row.masterTopic, row.writerKey])
+    )
+    const sig = Buffer.alloc(sodium.crypto_sign_BYTES)
+    sodium.crypto_sign_detached(sig, message, writer.secretKey)
+    return { ...row, sig: sig.toString('hex') }
+  }
+
+  it('binds no row whose masterTopic is uppercase hex', () => {
+    const row = signedRow({})
+    expect(verifyDeviceRow(row, vaultKeyHex)).toBe(true)
+
+    const upper = signedRow({ masterTopic: row.masterTopic.toUpperCase() })
+    expect(verifyDeviceRow(upper, vaultKeyHex)).toBe(false)
+    expect(
+      signDeviceRow({ secretKey: writer.secretKey, vaultKeyHex, ...upper })
+    ).toBeNull()
   })
 })
