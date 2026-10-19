@@ -1341,6 +1341,22 @@ describe('epochStore over real Autopass', () => {
     })
   })
 
+  it('re-signs my row again on the next run after the write failed', async () => {
+    const [, B] = await setup(['A', 'B'])
+    await addDevice(B, rowFor('B', B.keyPair, B.instance.writerKey))
+    jest
+      .spyOn(B.instance, 'add')
+      .mockRejectedValueOnce(new Error('append failed'))
+
+    await expect(B.store.ensureEpoch({ start: false })).rejects.toThrow(
+      'append failed'
+    )
+    await B.store.ensureEpoch({ start: false })
+    expect(
+      JSON.parse((await B.instance.get('device/B')).value).sig
+    ).toBeTruthy()
+  })
+
   it('seals to a device whose id is __proto__ and then stays current', async () => {
     const [A] = await setup(['A'])
     const proto = makeKeyPair()

@@ -589,7 +589,13 @@ export const createEpochStore = ({
       if (resigned.has(state)) continue
       if ((await instance.get(key))?.value !== row.raw) continue
       resigned.add(state)
-      await instance.add(key, signRow(key, row.raw))
+      try {
+        await instance.add(key, signRow(key, row.raw))
+      } catch (error) {
+        // Not written: the next run tries again.
+        resigned.delete(state)
+        throw error
+      }
       wrote = true
     }
     return wrote
