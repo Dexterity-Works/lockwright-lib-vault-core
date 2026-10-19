@@ -748,13 +748,15 @@ export const createEpochStore = ({
       canRead,
       // Only a device that once held a key and wrote here was let go. A
       // legacy row, a joiner whose row has not landed yet, or a kicked
-      // device pairing again on a fresh store is waiting, not revoked.
+      // device pairing again on a fresh store is waiting, not revoked. A row
+      // left behind for a removed writer does not keep a kicked device from
+      // learning it was revoked.
       revoked:
         !!latest &&
         !canRead &&
         Object.keys(ring).length > 0 &&
         instance.base.local?.length > 0 &&
-        !roster.some((row) => isMyRow(row, keyPair)),
+        !roster.some((row) => !row.removed && isMyRow(row, keyPair)),
       members: latest ? Object.keys(latest.members).sort() : [],
       uncovered: coverage().uncovered
     }

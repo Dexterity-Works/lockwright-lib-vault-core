@@ -826,6 +826,29 @@ describe('epochStore over real Autopass', () => {
     expect((await B.store.status()).revoked).toBe(false)
   })
 
+  it('reports revoked for a kicked device whose row was left behind', async () => {
+    const [A, B, C] = await setup()
+    await addDevice(C, C.row)
+    await sync(A, B, C)
+    await A.store.ensureEpoch({ start: true })
+    await sync(A, B, C)
+
+    // A concurrent append ordered before the removal, or a missed sweep.
+    await A.instance.removeWriter(C.instance.writerKey)
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      rotated: true,
+      members: ['A', 'B']
+    })
+    await A.store.add('record/x', '{}')
+    await sync(A, B, C)
+
+    expect(await C.instance.get('device/C')).toBeTruthy()
+    expect(await C.store.status()).toMatchObject({
+      canRead: false,
+      revoked: true
+    })
+  })
+
   it('does not report revoked for a legacy row or a joiner without a row', async () => {
     const A = await makePeer('A')
     const L = await makePeer('L', A)
