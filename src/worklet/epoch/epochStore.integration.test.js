@@ -270,7 +270,8 @@ const revokedFor = async ({
 // C is offline for its kick and appends the rows `plant` writes. Autobase
 // orders a removed writer's concurrent node before or after the removal by
 // key bytes, so the rows survive in some runs only; runs go on until two
-// did. Returns how many runs kept them.
+// did. A writes once right after the sync, before any ensureEpoch, under
+// its kick epoch. Returns how many runs kept them.
 const plantDuringKick = async (plant) => {
   let survived = 0
   for (let run = 0; run < 20 && survived < 2; run++) {
@@ -278,7 +279,7 @@ const plantDuringKick = async (plant) => {
     await indexed(A, B, C)
     await A.instance.removeWriter(C.instance.writerKey)
     await A.store.remove('device/C')
-    await A.store.ensureEpoch({ start: true })
+    const { id: kickEpoch } = await A.store.ensureEpoch({ start: true })
     const planted = await plant(A, B, C)
     await sync(A, B, C)
     for (let round = 0; round < 5; round++) {
@@ -286,6 +287,8 @@ const plantDuringKick = async (plant) => {
       await sync(A, B, C)
     }
     if (await A.instance.get(`device/${planted[0]}`)) survived++
+    await A.store.add('record/early', 'secret')
+    expect((await rawEnvelope(A, 'record/early')).e).toBe(kickEpoch)
 
     for (const peer of [A, B, C]) {
       await peer.store.ensureEpoch({ start: false })
@@ -1104,6 +1107,36 @@ describe('epochStore over real Autopass', () => {
     // C adds itself again under a fresh id.
     const survived = await plantDuringKick(async (A, B, C) => {
       await addDevice(C, ownRow(C, 'C2'))
+      return ['C2']
+    })
+    expect(survived).toBe(2)
+  })
+
+  it('never writes under an epoch chain a kicked writer appended with its row', async () => {
+    // C's chain outranks the kick epoch and is sealed to A and B, so only
+    // the author check on bound rows keeps A from writing under X2.
+    const survived = await plantDuringKick(async (A, B, C) => {
+      await addDevice(C, ownRow(C, 'C2'))
+      const x1 = 'a1'.repeat(16)
+      const x2 = 'a2'.repeat(16)
+      const ring = { [x1]: generateEpochKey() }
+      const to = [
+        ['A', A.keyPair],
+        ['B', B.keyPair]
+      ]
+      const records = [
+        epochBy(C.keyPair, { id: x1, seq: 1, ring, to }),
+        epochBy(C.keyPair, {
+          id: x2,
+          seq: 2,
+          prev: x1,
+          ring: { ...ring, [x2]: generateEpochKey() },
+          to
+        })
+      ]
+      for (const record of records) {
+        await C.instance.add(`epoch/${record.id}`, JSON.stringify(record))
+      }
       return ['C2']
     })
     expect(survived).toBe(2)
