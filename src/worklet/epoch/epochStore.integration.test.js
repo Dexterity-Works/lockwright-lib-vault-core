@@ -1216,6 +1216,60 @@ describe('epochStore over real Autopass', () => {
     })
   })
 
+  it('re-signs my unsigned row when my store opens, and is sealed to next', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    // An older build wrote B's row without a signature.
+    await addDevice(B, rowFor('B', B.keyPair, B.instance.writerKey))
+    await sync(A, B)
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      members: ['A'],
+      uncovered: ['B']
+    })
+    await sync(A, B)
+
+    createEpochStore({
+      instance: B.instance,
+      getPersonalKeyPair: async () => B.keyPair
+    })
+    for (let i = 0; i < 100; i++) {
+      if (JSON.parse((await B.instance.get('device/B')).value).sig) break
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    await sync(A, B)
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      members: ['A', 'B'],
+      uncovered: []
+    })
+    await A.store.add('record/x', 'v')
+    await sync(A, B)
+    expect(await value(B, 'record/x')).toBe('v')
+  })
+
+  it('re-signs my unsigned row in an ensureEpoch run, once per row state', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    await addDevice(B, rowFor('B', B.keyPair, B.instance.writerKey))
+    await sync(A, B)
+    await A.store.ensureEpoch({ start: true })
+    await sync(A, B)
+
+    const add = jest.spyOn(B.instance, 'add')
+    expect(await B.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: false,
+      reason: 'pending',
+      uncovered: []
+    })
+    expect(add.mock.calls.map(([key]) => key)).toEqual(['device/B'])
+    await B.store.ensureEpoch({ start: false })
+    expect(add).toHaveBeenCalledTimes(1)
+
+    await sync(A, B)
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      members: ['A', 'B']
+    })
+  })
+
   it('seals to a device whose id is __proto__ and then stays current', async () => {
     const [A] = await setup(['A'])
     const proto = makeKeyPair()
@@ -1570,13 +1624,13 @@ describe('epochStore over real Autopass', () => {
       instance: A.instance,
       getPersonalKeyPair: async () => {
         if (!fail) return A.keyPair
-        fail = false
         throw new Error('key store busy')
       }
     })
     await expect(failing.ensureEpoch({ start: true })).rejects.toThrow(
       'key store busy'
     )
+    fail = false
 
     const restarted = createEpochStore({
       instance: A.instance,

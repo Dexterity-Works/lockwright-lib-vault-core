@@ -167,7 +167,11 @@ export const createEpochStore = ({
    */
   const readRoster = async () => {
     const rows = (await readPrefix('device/'))
-      .map(({ key, value }) => ({ id: key.slice('device/'.length), value }))
+      .map(({ key, value, raw }) => ({
+        id: key.slice('device/'.length),
+        value,
+        raw
+      }))
       .filter(
         ({ id, value }) =>
           isDeviceId(id) &&
@@ -190,18 +194,19 @@ export const createEpochStore = ({
       )
     )
     const vaultKeyHex = instance.base.key?.toString('hex')
-    return rows.map(({ id, value }) =>
-      Object.assign(Object.create(null), value, {
+    return rows.map(({ id, value, raw }) => {
+      const signed = verifyDeviceRow(value, vaultKeyHex)
+      return Object.assign(Object.create(null), value, {
         id,
         // Anything but a usable key string counts as no masterTopic.
         masterTopic: canSealTo(value.masterTopic)
           ? value.masterTopic
           : undefined,
-        bound:
-          active.get(value.writerKey) === true &&
-          verifyDeviceRow(value, vaultKeyHex)
+        bound: signed && active.get(value.writerKey) === true,
+        signed,
+        raw
       })
-    )
+    })
   }
 
   const verifyOnce = (record, { key, raw }) => {
@@ -550,8 +555,38 @@ export const createEpochStore = ({
     }
   }
 
+  // `${id}\n${raw}` of my rows already re-signed, so a row that stays
+  // unsigned is written once, not on every run.
+  const resigned = new Set()
+
+  // My rows (by masterTopic) with my writer key whose signature does not
+  // verify, an older build's say, are written again through add, which
+  // signs them. Returns whether it wrote.
+  const resignMyRows = async () => {
+    if (!instance.base.writable) return false
+    const keyPair = await getPersonalKeyPair()
+    const writerKey = instance.writerKey?.toString('hex')
+    let wrote = false
+    for (const row of roster) {
+      if (
+        row.signed ||
+        row.writerKey !== writerKey ||
+        !isMe(row.masterTopic, keyPair)
+      ) {
+        continue
+      }
+      const state = `${row.id}\n${row.raw}`
+      if (resigned.has(state)) continue
+      resigned.add(state)
+      await add(`device/${row.id}`, row.raw)
+      wrote = true
+    }
+    return wrote
+  }
+
   const doEnsureEpoch = async ({ start = false } = {}, retried = false) => {
     await refresh()
+    if (await resignMyRows()) await refresh()
     const keyPair = await getPersonalKeyPair()
     const { sealable, uncovered } = coverage()
     const skip = (reason) => ({ rotated: false, reason, uncovered })
@@ -704,6 +739,15 @@ export const createEpochStore = ({
       uncovered: coverage().uncovered
     }
   }
+
+  // On open, once the first refresh read the roster.
+  refresh()
+    .then(resignMyRows)
+    .catch((error) => {
+      logger.warn('epochStore: could not re-sign my roster row', {
+        error: error?.name
+      })
+    })
 
   return { add, get, find, remove, refresh, ensureEpoch, status }
 }
