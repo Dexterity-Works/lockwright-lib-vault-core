@@ -100,7 +100,9 @@ jest.mock('./appDeps', () => ({
 }))
 
 jest.mock('sodium-native', () => {
+  // The rest stays real: hypercore hashes its namespaces on import.
   const api = {
+    ...jest.requireActual('sodium-native'),
     crypto_secretbox_easy: jest.fn(),
     crypto_secretbox_open_easy: jest.fn(),
     randombytes_buf: jest.fn()

@@ -17,7 +17,9 @@ import {
   openRing,
   opensCheck,
   sealCheck,
-  sealRing
+  sealRing,
+  signDeviceRow,
+  verifyDeviceRow
 } from './keyring.js'
 
 const RECORDS = '@autopass/records'
@@ -143,21 +145,25 @@ export const createEpochStore = ({
     offered.get(epochId).add(key)
   }
 
+  const bound = (rows) => rows.filter((row) => row.bound)
+
   const isWriterKey = (key) =>
     typeof key === 'string' && /^[0-9a-f]{64}$/.test(key)
 
   /**
    * Well-formed `device/` rows. A row is the device its key names, and must
    * say so in `id`: lib-vault lists and sweeps rows by `value.id`, so a row
-   * without it could not be kicked. Its `writerKey` must name a writer the
-   * vault holds, present and not removed: Autobase can order a removed
-   * writer's concurrent append before the removal, so a row a kicked device
-   * wrote offline survives the sweep. Each writer key counts for one
-   * masterTopic, the first in key order; a later row with another one is
-   * malformed. A malformed row is not sealed to, not an author, and not
-   * uncovered, so a planted row cannot stand in for a real device. Rows
-   * have no prototype, so a field the row lacks never comes from
-   * Object.prototype.
+   * without it could not be kicked. A malformed row is not sealed to, not an
+   * author, and not uncovered.
+   *
+   * A row is `bound` when its writer signed it for this vault (see
+   * verifyDeviceRow) and `base.system` holds that writer, present and not
+   * removed. Autopass stores a row whoever appended it, and Autobase can
+   * order a removed writer's concurrent append before the removal, so only a
+   * bound row is sealed to or counts as an author. An unbound row is
+   * uncovered: an older build's unsigned row, or one a kicked device planted
+   * under its own or another writer key. Rows have no prototype, so a field
+   * the row lacks never comes from Object.prototype.
    */
   const readRoster = async () => {
     const rows = (await readPrefix('device/'))
@@ -167,11 +173,12 @@ export const createEpochStore = ({
           isDeviceId(id) &&
           !!value &&
           typeof value === 'object' &&
-          value.id === id &&
-          isWriterKey(value.writerKey)
+          value.id === id
       )
     // One system lookup per writer key. Null for a writer it never added.
-    const writerKeys = [...new Set(rows.map(({ value }) => value.writerKey))]
+    const writerKeys = [
+      ...new Set(rows.map(({ value }) => value.writerKey).filter(isWriterKey))
+    ]
     const active = new Map(
       await Promise.all(
         writerKeys.map(async (writerKey) => {
@@ -182,30 +189,19 @@ export const createEpochStore = ({
         })
       )
     )
-    // writerKey -> the masterTopic its first row named.
-    const topics = new Map()
-    const kept = []
-    for (const { id, value } of rows) {
-      const { writerKey } = value
-      if (!active.get(writerKey)) continue
-      // Anything but a usable key string counts as no masterTopic.
-      const masterTopic = canSealTo(value.masterTopic)
-        ? value.masterTopic
-        : undefined
-      if (masterTopic) {
-        const topic = masterTopic.toLowerCase()
-        if (!topics.has(writerKey)) topics.set(writerKey, topic)
-        else if (topics.get(writerKey) !== topic) continue
-      }
-      kept.push(
-        Object.assign(Object.create(null), value, {
-          id,
-          writerKey,
-          masterTopic
-        })
-      )
-    }
-    return kept
+    const vaultKeyHex = instance.base.key?.toString('hex')
+    return rows.map(({ id, value }) =>
+      Object.assign(Object.create(null), value, {
+        id,
+        // Anything but a usable key string counts as no masterTopic.
+        masterTopic: canSealTo(value.masterTopic)
+          ? value.masterTopic
+          : undefined,
+        bound:
+          active.get(value.writerKey) === true &&
+          verifyDeviceRow(value, vaultKeyHex)
+      })
+    )
   }
 
   const verifyOnce = (record, { key, raw }) => {
@@ -222,7 +218,9 @@ export const createEpochStore = ({
     const keyPair = await getPersonalKeyPair()
     const nextRoster = await readRoster()
     const records = await readPrefix('epoch/')
-    const next = resolveEpochs(records, nextRoster, { verify: verifyOnce })
+    const next = resolveEpochs(records, bound(nextRoster), {
+      verify: verifyOnce
+    })
 
     const valid = new Set(next.valid)
     for (const { key, value } of records) {
@@ -325,13 +323,53 @@ export const createEpochStore = ({
     }
   }
 
+  // My writer signs a device row that names it; any other row is stored
+  // as given and stays unbound.
+  const signRow = (key, value) => {
+    if (!key.startsWith('device/') || !instance.base.writable) return value
+    let row
+    try {
+      row = JSON.parse(value)
+    } catch {
+      return value
+    }
+    const { local } = instance.base
+    if (
+      !row ||
+      typeof row !== 'object' ||
+      row.writerKey !== instance.writerKey?.toString('hex') ||
+      !local?.keyPair
+    ) {
+      return value
+    }
+    const sig = signDeviceRow({
+      secretKey: local.keyPair.secretKey,
+      vaultKeyHex: instance.base.key?.toString('hex'),
+      id: row.id,
+      masterTopic: row.masterTopic,
+      writerKey: row.writerKey
+    })
+    if (!sig) return value
+    return JSON.stringify({
+      ...row,
+      writerPublicKey: local.keyPair.publicKey.toString('hex'),
+      sig
+    })
+  }
+
+  /**
+   * Values under `vault`, `vault-ext`, `device/` and `epoch/` stay
+   * plaintext; anything else is sealed under the latest epoch once one
+   * exists. A `device/` row whose `writerKey` is this device's writer is
+   * signed first, when the base is writable, so it binds (see readRoster).
+   */
   const add = async (key, value, file) => {
     refuseEpochKey(key)
     // Always re-resolve before a write: a stale epoch would leak the value
     // to a device that was just removed.
     await refresh()
     if (isPlaintextKey(key) || legacy) {
-      return instance.add(key, value, file)
+      return instance.add(key, signRow(key, value), file)
     }
 
     if (isStale()) {
@@ -407,7 +445,7 @@ export const createEpochStore = ({
     const sealedWriters = new Set()
     const rest = []
     for (const row of roster) {
-      if (canSealTo(row.masterTopic)) {
+      if (row.bound && canSealTo(row.masterTopic)) {
         if (!sealable.has(row.id)) {
           sealable.set(row.id, { id: row.id, masterTopic: row.masterTopic })
         }
@@ -416,8 +454,9 @@ export const createEpochStore = ({
         rest.push(row)
       }
     }
-    // A row without masterTopic that shares a writer with a sealable row is
-    // a stale copy of a device that already has a key.
+    // An unsealable row that shares a writer with a sealable row is a stale
+    // copy of a device that already has a key, or a row planted under a
+    // member's writer key.
     const uncovered = rest
       .filter((row) => !row.writerKey || !sealedWriters.has(row.writerKey))
       .map((row) => row.id)
@@ -452,7 +491,7 @@ export const createEpochStore = ({
     const box = openedBoxes.get(`${latest.id}:${latest.sig}`)
     const me = keyPair.publicKey.toString('hex')
     const authors = new Set(
-      roster.flatMap((row) => row.masterTopic?.toLowerCase() ?? [])
+      bound(roster).flatMap((row) => row.masterTopic?.toLowerCase() ?? [])
     )
     return epochs.valid.some(
       (record) =>

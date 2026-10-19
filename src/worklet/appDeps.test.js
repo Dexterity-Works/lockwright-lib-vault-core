@@ -268,6 +268,7 @@ global.Bare = {
 
 import Autopass from 'autopass'
 import bareFs from 'bare-fs'
+import Hypercore from 'hypercore'
 
 import * as appDeps from './appDeps'
 import { buildEpochRecord, generateEpochId } from './epoch/epochRecord'
@@ -277,10 +278,14 @@ import {
   generateEpochKey,
   sealCheck,
   sealRing,
+  signDeviceRow,
+  verifyDeviceRow,
   writeErrorMessage
 } from './epoch/keyring'
 
 const mockSodium = require('sodium-native')
+
+const VAULT_KEY = Buffer.alloc(32, 0x22)
 
 // In-memory records behind the mocked active vault: add/get/remove and a
 // HyperDB-style range find, so the real epoch store runs over it.
@@ -308,6 +313,9 @@ const useMemoryVault = (instance, rows = new Map()) => {
     }
   }))
   instance.base.writable = true
+  instance.base.key = VAULT_KEY
+  // The local writer key is the hash of its core's manifest.
+  instance.writerKey = Hypercore.key(instance.base.local.keyPair.publicKey)
   // Every writer a row names is a current writer.
   instance.base.system = {
     get: async () => ({ isIndexer: true, isRemoved: false, length: 1 })
@@ -323,13 +331,28 @@ const makeSignKeyPair = () => {
   return { publicKey, secretKey }
 }
 
-// The signing key stands in as the writer key: unique per device.
-const deviceRow = (id, keyPair) =>
-  JSON.stringify({
+// A row its writer signed. The device key stands in as the writer key
+// pair unless `writer` names one, so each device has its own writer.
+const deviceRow = (id, keyPair, writer = keyPair) => {
+  const row = {
     id,
-    writerKey: keyPair.publicKey.toString('hex'),
+    writerKey: Hypercore.key(writer.publicKey).toString('hex'),
     masterTopic: keyPair.publicKey.toString('hex')
+  }
+  return JSON.stringify({
+    ...row,
+    writerPublicKey: writer.publicKey.toString('hex'),
+    sig: signDeviceRow({
+      secretKey: writer.secretKey,
+      vaultKeyHex: VAULT_KEY.toString('hex'),
+      ...row
+    })
   })
+}
+
+// My row, written by the active vault's local writer.
+const myRow = (me) =>
+  deviceRow('me', me, appDeps.getActiveVaultInstance().base.local.keyPair)
 
 const waitFor = async (check) => {
   for (let i = 0; i < 200 && !check(); i++) {
@@ -1128,7 +1151,7 @@ describe('appDeps module functions (excluding encryption)', () => {
       })
       me = await appDeps.getPersonalKeyPair()
       vault = useMemoryVault(appDeps.getActiveVaultInstance())
-      vault.put('device/me', deviceRow('me', me))
+      vault.put('device/me', myRow(me))
     })
 
     afterEach(async () => {
@@ -1218,6 +1241,25 @@ describe('appDeps module functions (excluding encryption)', () => {
       const stored = vault.rows.get('note/2').value
       expect(JSON.parse(stored)).toMatchObject({ $enc: 1, e: result.id })
       expect(stored).not.toContain('after')
+    })
+
+    test('activeVaultAdd signs a device row that names this writer', async () => {
+      const writerKey = appDeps.activeVaultGetWriterKey()
+      const row = {
+        id: 'me',
+        name: 'phone',
+        writerKey,
+        masterTopic: me.publicKey.toString('hex')
+      }
+      await appDeps.activeVaultAdd('device/me', row)
+      const stored = JSON.parse(vault.rows.get('device/me').value)
+      expect(stored).toMatchObject(row)
+      expect(verifyDeviceRow(stored, VAULT_KEY.toString('hex'))).toBe(true)
+
+      // Another writer's row is stored as given.
+      const other = { ...row, id: 'other', writerKey: 'ab'.repeat(32) }
+      await appDeps.activeVaultAdd('device/other', other)
+      expect(JSON.parse(vault.rows.get('device/other').value)).toEqual(other)
     })
 
     test('get, getFile, list and find decrypt and omit unreadable records', async () => {
@@ -1618,7 +1660,10 @@ describe('appDeps module functions (excluding encryption)', () => {
         Autopass.mockImplementationOnce((...args) => {
           const instance = make(...args)
           vault = useMemoryVault(instance)
-          vault.put('device/me', deviceRow('me', me))
+          vault.put(
+            'device/me',
+            deviceRow('me', me, instance.base.local.keyPair)
+          )
           putForeignEpoch()
           vault.put('record/r1', v1Record)
           return instance
@@ -1762,10 +1807,7 @@ describe('appDeps module functions (excluding encryption)', () => {
         if (key.startsWith('epoch/')) throw new Error('disk full')
         return add(key, ...rest)
       })
-      vault.put(
-        'device/legacy',
-        JSON.stringify({ id: 'legacy', writerKey: 'ab'.repeat(32) })
-      )
+      vault.put('device/legacy', JSON.stringify({ id: 'legacy' }))
       vault.put('device/other', deviceRow('other', makeSignKeyPair()))
       await fireUpdate()
 

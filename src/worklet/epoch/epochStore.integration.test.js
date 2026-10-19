@@ -4,6 +4,7 @@ import path from 'path'
 
 import Autopass from 'autopass'
 import Corestore from 'corestore'
+import Hypercore from 'hypercore'
 import sodium from 'sodium-native'
 
 import { buildEpochRecord } from './epochRecord.js'
@@ -15,7 +16,8 @@ import {
   generateEpochKey,
   openRing,
   sealCheck,
-  sealRing
+  sealRing,
+  signDeviceRow
 } from './keyring.js'
 
 jest.setTimeout(60000)
@@ -37,17 +39,46 @@ const rowFor = (id, keyPair, writerKey) => ({
   createdAt: Date.now()
 })
 
-// A current writer no peer here runs. A roster row counts only while its
+// The row as its writer signs it: `writer` is that writer's Hypercore key
+// pair, `vaultKey` the vault's Autobase key.
+const signRow = (row, writer, vaultKey) => ({
+  ...row,
+  writerPublicKey: writer.publicKey.toString('hex'),
+  sig: signDeviceRow({
+    secretKey: writer.secretKey,
+    vaultKeyHex: vaultKey.toString('hex'),
+    id: row.id,
+    masterTopic: row.masterTopic,
+    writerKey: row.writerKey
+  })
+})
+
+// A row signed by the peer's own writer, as the store's add path signs it.
+const ownRow = (peer, id, keyPair = peer.keyPair) =>
+  signRow(
+    rowFor(id, keyPair, peer.instance.writerKey),
+    peer.instance.base.local.keyPair,
+    peer.instance.base.key
+  )
+
+// A current writer no peer here runs. A roster row binds only while its
 // writer is a current writer, so a device that is not a peer needs one.
 const strayWriter = async (host) => {
-  const key = Buffer.alloc(32)
-  sodium.randombytes_buf(key)
+  const keyPair = makeKeyPair()
+  const key = Hypercore.key(keyPair.publicKey)
   await host.instance.addWriter(key)
-  return key
+  return { key, keyPair }
 }
 
-const strayRow = async (host, id, keyPair = makeKeyPair()) =>
-  rowFor(id, keyPair, await strayWriter(host))
+// A bound row for a device no peer here runs.
+const strayRow = async (host, id, keyPair = makeKeyPair()) => {
+  const writer = await strayWriter(host)
+  return signRow(
+    rowFor(id, keyPair, writer.key),
+    writer.keyPair,
+    host.instance.base.key
+  )
+}
 
 const makePeer = async (id, host, keyPair = makeKeyPair()) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'epoch-store-'))
@@ -70,7 +101,7 @@ const makePeer = async (id, host, keyPair = makeKeyPair()) => {
     logger
   })
   const peer = { id, dir, corestore, instance, keyPair, logger, store }
-  peer.row = rowFor(id, keyPair, instance.writerKey)
+  peer.row = ownRow(peer, id)
   peers.push(peer)
   return peer
 }
@@ -234,6 +265,46 @@ const revokedFor = async ({
     })
   }
   return (await X.store.status()).revoked
+}
+
+// C is offline for its kick and appends the rows `plant` writes. Autobase
+// orders a removed writer's concurrent node before or after the removal by
+// key bytes, so the rows survive in some runs only; runs go on until two
+// did. Returns how many runs kept them.
+const plantDuringKick = async (plant) => {
+  let survived = 0
+  for (let run = 0; run < 20 && survived < 2; run++) {
+    const [A, B, C] = await setup()
+    await indexed(A, B, C)
+    await A.instance.removeWriter(C.instance.writerKey)
+    await A.store.remove('device/C')
+    await A.store.ensureEpoch({ start: true })
+    const planted = await plant(A, B, C)
+    await sync(A, B, C)
+    for (let round = 0; round < 5; round++) {
+      for (const peer of [A, B, C]) await peer.instance.base.ack()
+      await sync(A, B, C)
+    }
+    if (await A.instance.get(`device/${planted[0]}`)) survived++
+
+    for (const peer of [A, B, C]) {
+      await peer.store.ensureEpoch({ start: false })
+    }
+    await A.store.add('record/after', 'secret')
+    await sync(A, B, C)
+
+    expect(await value(B, 'record/after')).toBe('secret')
+    expect(await C.store.get('record/after')).toBeNull()
+    const { members, uncovered } = await A.store.status()
+    expect(members).toEqual(['A', 'B'])
+    expect(planted).toEqual(expect.arrayContaining(uncovered))
+    for (const peer of peers.splice(0)) {
+      await peer.instance.close()
+      await peer.corestore.close()
+      fs.rmSync(peer.dir, { recursive: true, force: true })
+    }
+  }
+  return survived
 }
 
 afterEach(async () => {
@@ -682,11 +753,7 @@ describe('epochStore over real Autopass', () => {
 
   it('stays plaintext in a legacy vault and reports uncovered rows', async () => {
     const [A] = await setup(['A'])
-    await addDevice(A, {
-      ...(await strayRow(A, 'L')),
-      name: 'legacy device',
-      masterTopic: undefined
-    })
+    await addDevice(A, { id: 'L', name: 'legacy device', createdAt: 1 })
     // A stale row of A from before it had a masterTopic is not uncovered.
     await addDevice(A, { id: 'A-old', writerKey: A.row.writerKey })
     await A.store.add('record/a', '{"title":"a"}')
@@ -1033,43 +1100,30 @@ describe('epochStore over real Autopass', () => {
   })
 
   it('never seals to a row a kicked writer appended concurrently with its removal', async () => {
-    // Autobase orders a removed writer's concurrent node before or after
-    // the removal by key bytes, so the row survives in some runs only.
-    let survived = 0
-    for (let run = 0; run < 20 && survived < 2; run++) {
-      const [A, B, C] = await setup()
-      await indexed(A, B, C)
-      await A.instance.removeWriter(C.instance.writerKey)
-      await A.store.remove('device/C')
-      await A.store.ensureEpoch({ start: true })
-      // C is offline for the kick and adds itself again under a fresh id.
-      await addDevice(C, rowFor('C2', C.keyPair, C.instance.writerKey))
-      await sync(A, B, C)
-      for (let round = 0; round < 5; round++) {
-        for (const peer of [A, B, C]) await peer.instance.base.ack()
-        await sync(A, B, C)
-      }
-      if (await A.instance.get('device/C2')) survived++
+    // C adds itself again under a fresh id.
+    const survived = await plantDuringKick(async (A, B, C) => {
+      await addDevice(C, ownRow(C, 'C2'))
+      return ['C2']
+    })
+    expect(survived).toBe(2)
+  })
 
-      for (const peer of [A, B, C]) {
-        await peer.store.ensureEpoch({ start: false })
-      }
-      await A.store.add('record/after', 'secret')
-      await sync(A, B, C)
+  it('never seals to a row a kicked writer planted under a member writer key', async () => {
+    // device/! sorts before every real row.
+    const survived = await plantDuringKick(async (A, B, C) => {
+      await addDevice(C, rowFor('!', C.keyPair, A.instance.writerKey))
+      return ['!']
+    })
+    expect(survived).toBe(2)
+  })
 
-      expect(await value(B, 'record/after')).toBe('secret')
-      expect(await C.store.get('record/after')).toBeNull()
-      expect(await A.store.status()).toMatchObject({
-        members: ['A', 'B'],
-        uncovered: []
-      })
-      for (const peer of peers.splice(0)) {
-        await peer.instance.close()
-        await peer.corestore.close()
-        fs.rmSync(peer.dir, { recursive: true, force: true })
-      }
-    }
-    expect(survived).toBeGreaterThan(0)
+  it('never seals to rows a kicked writer planted under every member writer key', async () => {
+    const survived = await plantDuringKick(async (A, B, C) => {
+      await addDevice(C, rowFor('!', C.keyPair, A.instance.writerKey))
+      await addDevice(C, rowFor('!!', C.keyPair, B.instance.writerKey))
+      return ['!', '!!']
+    })
+    expect(survived).toBe(2)
   })
 
   it('seals to a device that heals its own row under the same id', async () => {
@@ -1082,7 +1136,11 @@ describe('epochStore over real Autopass', () => {
       uncovered: ['B']
     })
 
-    await addDevice(B, B.row)
+    // The heal goes through the store, which signs it.
+    await B.store.add(
+      'device/B',
+      JSON.stringify(rowFor('B', B.keyPair, B.instance.writerKey))
+    )
     await sync(A, B)
     expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
       rotated: true,
@@ -1094,41 +1152,67 @@ describe('epochStore over real Autopass', () => {
     expect(await value(B, 'record/x')).toBe('v')
   })
 
-  it('counts only the first masterTopic a writer key names', async () => {
+  it('seals to every row a writer signed, without knocking out another member', async () => {
     const [A, B] = await setup(['A', 'B'])
-    const puppet = makeKeyPair()
-    await addDevice(B, rowFor('B2', puppet, B.instance.writerKey))
+    // device/0 sorts before device/A and names B's other device key.
+    await addDevice(B, ownRow(B, '0', makeKeyPair()))
     await sync(A, B)
 
     expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
       rotated: true,
-      members: ['A', 'B'],
+      members: ['0', 'A', 'B'],
       uncovered: []
     })
-    // Without its masterTopic the second row is a stale copy, not a device.
+    // Without its masterTopic a row of B's writer is a stale copy, not a
+    // device.
     await addDevice(B, {
-      ...rowFor('B3', puppet, B.instance.writerKey),
+      ...rowFor('B3', B.keyPair, B.instance.writerKey),
       masterTopic: undefined
     })
     await sync(A, B)
     expect((await A.store.status()).uncovered).toEqual([])
   })
 
-  it('neither seals to nor reports a row whose writer the vault does not know', async () => {
+  it('reports rows without a writer binding as uncovered and never seals to them', async () => {
     const [A] = await setup(['A'])
     const stranger = Buffer.alloc(32, 7)
+    // A writer the vault does not know, with and without a masterTopic.
     await addDevice(A, rowFor('U', makeKeyPair(), stranger))
     await addDevice(A, { id: 'V', writerKey: stranger.toString('hex') })
+    // No writerKey at all.
     await addDevice(A, { ...rowFor('W', makeKeyPair()), writerKey: undefined })
+    // A current writer, but no signature.
+    const { sig, writerPublicKey, ...unsigned } = await strayRow(A, 'N')
+    expect(sig && writerPublicKey).toBeTruthy()
+    await addDevice(A, unsigned)
 
     expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
       rotated: true,
       members: ['A'],
-      uncovered: []
+      uncovered: ['N', 'U', 'V', 'W']
     })
     expect(await A.store.status()).toMatchObject({
       members: ['A'],
-      uncovered: []
+      uncovered: ['N', 'U', 'V', 'W']
+    })
+  })
+
+  it('does not bind a row signed for another vault', async () => {
+    const [A] = await setup(['A'])
+    const writer = await strayWriter(A)
+    await addDevice(
+      A,
+      signRow(
+        rowFor('R', makeKeyPair(), writer.key),
+        writer.keyPair,
+        Buffer.alloc(32, 9)
+      )
+    )
+
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      rotated: true,
+      members: ['A'],
+      uncovered: ['R']
     })
   })
 

@@ -1,3 +1,4 @@
+import Hypercore from 'hypercore'
 import sodium from 'sodium-native'
 
 export class EpochKeyUnavailableError extends Error {
@@ -355,5 +356,84 @@ export const opensCheck = (check, keyB64) => {
   } finally {
     free(key)
     if (plain) free(plain)
+  }
+}
+
+/** Domain prefix of a device row signature. */
+export const DEVICE_ROW_CONSTANT = 'lockwright/device-row/v1'
+
+const isLowerHex = (value, length) =>
+  typeof value === 'string' &&
+  value.length === length &&
+  /^[0-9a-f]+$/.test(value)
+
+// Null when a field has the wrong shape. The masterTopic is signed as the
+// row spells it.
+const deviceRowMessage = ({ vaultKeyHex, id, masterTopic, writerKey }) =>
+  isLowerHex(vaultKeyHex, 64) &&
+  typeof id === 'string' &&
+  typeof masterTopic === 'string' &&
+  MASTER_TOPIC.test(masterTopic) &&
+  isLowerHex(writerKey, 64)
+    ? Buffer.from(
+        DEVICE_ROW_CONSTANT +
+          JSON.stringify([vaultKeyHex, id, masterTopic, writerKey])
+      )
+    : null
+
+/**
+ * Signs a roster row as its writer, with the Hypercore writer key pair.
+ * @param {{ secretKey: Buffer, vaultKeyHex: string, id: string,
+ *   masterTopic: string, writerKey: string }} opts
+ * @returns {string | null} detached Ed25519 signature hex, or null when a
+ *   field has the wrong shape
+ */
+export const signDeviceRow = ({
+  secretKey,
+  vaultKeyHex,
+  id,
+  masterTopic,
+  writerKey
+}) => {
+  const message = deviceRowMessage({ vaultKeyHex, id, masterTopic, writerKey })
+  if (
+    !message ||
+    !Buffer.isBuffer(secretKey) ||
+    secretKey.length !== sodium.crypto_sign_SECRETKEYBYTES
+  ) {
+    return null
+  }
+  const sig = Buffer.alloc(sodium.crypto_sign_BYTES)
+  sodium.crypto_sign_detached(sig, message, secretKey)
+  return sig.toString('hex')
+}
+
+/**
+ * Whether the row's writer signed it for this vault. A writer key is the
+ * hash of its core's manifest, not the signer's public key, so the row
+ * carries `writerPublicKey` and it must hash to `writerKey`.
+ * @param {unknown} row parsed `device/` value
+ * @param {string} vaultKeyHex
+ * @returns {boolean}
+ */
+export const verifyDeviceRow = (row, vaultKeyHex) => {
+  if (!row || typeof row !== 'object') return false
+  const { id, masterTopic, writerKey, writerPublicKey, sig } = row
+  const message = deviceRowMessage({ vaultKeyHex, id, masterTopic, writerKey })
+  if (!message || !isLowerHex(writerPublicKey, 64) || !isLowerHex(sig, 128)) {
+    return false
+  }
+  try {
+    const publicKey = Buffer.from(writerPublicKey, 'hex')
+    return (
+      Hypercore.key(publicKey).toString('hex') === writerKey &&
+      sodium.crypto_sign_verify_detached(
+        Buffer.from(sig, 'hex'),
+        message,
+        publicKey
+      )
+    )
+  } catch {
+    return false
   }
 }
