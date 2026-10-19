@@ -80,9 +80,9 @@ const strayRow = async (host, id, keyPair = makeKeyPair()) => {
   )
 }
 
-const makePeer = async (id, host, keyPair = makeKeyPair()) => {
+const makePeer = async (id, host, keyPair = makeKeyPair(), storeOpts) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'epoch-store-'))
-  const corestore = new Corestore(dir)
+  const corestore = new Corestore(dir, storeOpts)
   const instance = new Autopass(
     corestore,
     host
@@ -1228,6 +1228,25 @@ describe('epochStore over real Autopass', () => {
     expect(await A.store.status()).toMatchObject({
       members: ['A'],
       uncovered: ['N', 'U', 'V', 'W']
+    })
+  })
+
+  it('binds my row when my writer core uses manifest version 2', async () => {
+    const A = await makePeer('A', null, undefined, { manifestVersion: 2 })
+    const { local } = A.instance.base
+    expect(Hypercore.key(local.keyPair.publicKey, { version: 2 })).toEqual(
+      local.key
+    )
+    expect(Hypercore.key(local.keyPair.publicKey)).not.toEqual(local.key)
+    await A.store.add(
+      'device/A',
+      JSON.stringify(rowFor('A', A.keyPair, A.instance.writerKey))
+    )
+
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      rotated: true,
+      members: ['A'],
+      uncovered: []
     })
   })
 

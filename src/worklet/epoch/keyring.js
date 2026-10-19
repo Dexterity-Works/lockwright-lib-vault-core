@@ -411,7 +411,8 @@ export const signDeviceRow = ({
 /**
  * Whether the row's writer signed it for this vault. A writer key is the
  * hash of its core's manifest, not the signer's public key, so the row
- * carries `writerPublicKey` and it must hash to `writerKey`.
+ * carries `writerPublicKey` and it must hash to `writerKey`. Corestore
+ * manifest versions 1 and 2 both name the key as the single signer.
  * @param {unknown} row parsed `device/` value
  * @param {string} vaultKeyHex
  * @returns {boolean}
@@ -426,7 +427,10 @@ export const verifyDeviceRow = (row, vaultKeyHex) => {
   try {
     const publicKey = Buffer.from(writerPublicKey, 'hex')
     return (
-      Hypercore.key(publicKey).toString('hex') === writerKey &&
+      [1, 2].some(
+        (version) =>
+          Hypercore.key(publicKey, { version }).toString('hex') === writerKey
+      ) &&
       sodium.crypto_sign_verify_detached(
         Buffer.from(sig, 'hex'),
         message,
