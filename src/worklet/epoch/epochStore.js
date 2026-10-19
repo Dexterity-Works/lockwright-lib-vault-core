@@ -568,8 +568,9 @@ export const createEpochStore = ({
   const resigned = new Set()
 
   // My rows (by masterTopic) with my writer key whose signature does not
-  // verify, an older build's say, are written again through add, which
-  // signs them. Returns whether it wrote.
+  // verify, an older build's say, are written again, signed. A row that
+  // changed since the refresh read it (a heal, say) is left for the next
+  // run, so its newer content is not overwritten. Returns whether it wrote.
   const resignMyRows = async () => {
     if (!instance.base.writable) return false
     const keyPair = await getPersonalKeyPair()
@@ -583,10 +584,12 @@ export const createEpochStore = ({
       ) {
         continue
       }
+      const key = `device/${row.id}`
       const state = `${row.id}\n${row.raw}`
       if (resigned.has(state)) continue
+      if ((await instance.get(key))?.value !== row.raw) continue
       resigned.add(state)
-      await add(`device/${row.id}`, row.raw)
+      await instance.add(key, signRow(key, row.raw))
       wrote = true
     }
     return wrote

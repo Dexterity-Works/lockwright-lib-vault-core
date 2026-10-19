@@ -1304,6 +1304,43 @@ describe('epochStore over real Autopass', () => {
     })
   })
 
+  it('leaves a row written between refresh and re-sign for the next run', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    // The second key pair lookup of a run is resignMyRows', after the
+    // refresh read the roster.
+    let healAt = 0
+    const store = createEpochStore({
+      instance: B.instance,
+      getPersonalKeyPair: async () => {
+        if (healAt > 0 && --healAt === 0) {
+          await addDevice(B, {
+            ...rowFor('B', B.keyPair, B.instance.writerKey),
+            name: 'healed'
+          })
+        }
+        return B.keyPair
+      }
+    })
+    await store.refresh()
+    await addDevice(B, rowFor('B', B.keyPair, B.instance.writerKey))
+
+    healAt = 2
+    await store.ensureEpoch({ start: false })
+    const row = async () => JSON.parse((await B.instance.get('device/B')).value)
+    expect(await row()).toMatchObject({ name: 'healed' })
+
+    await store.ensureEpoch({ start: false })
+    expect(await row()).toMatchObject({
+      name: 'healed',
+      sig: expect.any(String)
+    })
+    await sync(A, B)
+    expect(await A.store.ensureEpoch({ start: true })).toMatchObject({
+      members: ['A', 'B'],
+      uncovered: []
+    })
+  })
+
   it('seals to a device whose id is __proto__ and then stays current', async () => {
     const [A] = await setup(['A'])
     const proto = makeKeyPair()
