@@ -144,7 +144,7 @@ export const createEpochStore = ({
   }
 
   const isWriterKey = (key) =>
-    typeof key === 'string' && /^[0-9a-f]{64}$/i.test(key)
+    typeof key === 'string' && /^[0-9a-f]{64}$/.test(key)
 
   /**
    * Well-formed `device/` rows. A row is the device its key names, and must
@@ -171,9 +171,7 @@ export const createEpochStore = ({
           isWriterKey(value.writerKey)
       )
     // One system lookup per writer key. Null for a writer it never added.
-    const writerKeys = [
-      ...new Set(rows.map(({ value }) => value.writerKey.toLowerCase()))
-    ]
+    const writerKeys = [...new Set(rows.map(({ value }) => value.writerKey))]
     const active = new Map(
       await Promise.all(
         writerKeys.map(async (writerKey) => {
@@ -188,7 +186,7 @@ export const createEpochStore = ({
     const topics = new Map()
     const kept = []
     for (const { id, value } of rows) {
-      const writerKey = value.writerKey.toLowerCase()
+      const { writerKey } = value
       if (!active.get(writerKey)) continue
       // Anything but a usable key string counts as no masterTopic.
       const masterTopic = canSealTo(value.masterTopic)
