@@ -98,6 +98,12 @@ let vaultMigrationStatus = {
 // The migration waits for this device to read or write the latest epoch:
 // runEpochSync runs it again once it can.
 let migrationDeferred = false
+// The latest epoch, read before its listing, of a run that ended incomplete
+// with rows it could not read. runEpochSync runs it again on a new latest
+// epoch it can open, since a rotation may carry their key: once per
+// rotation, not per update. A key that only a losing fork record carries,
+// with no new latest, waits for the next open.
+let skippedAtEpoch
 const EPOCH_KEY_PENDING = 'epoch-key-pending'
 
 /** @type {Set<string>} */
@@ -260,6 +266,7 @@ export const closeActiveVaultInstance = async (options) => {
   listeningVaultId = null
   previousV1RecordIds = new Set()
   migrationDeferred = false
+  skippedAtEpoch = undefined
   vaultMigrationStatus = {
     ready: false,
     inProgress: false,
@@ -448,6 +455,7 @@ const refreshPreviousV1RecordIds = async () => {
 }
 
 const runVaultMigration = async () => {
+  skippedAtEpoch = undefined
   vaultMigrationStatus = {
     ...vaultMigrationStatus,
     ready: false,
@@ -459,7 +467,7 @@ const runVaultMigration = async () => {
   try {
     // Read before the listing: a key that lands after it would make rows
     // the listing skipped look permanently unreadable.
-    const { canRead } = await epochStore.status()
+    const { canRead, epoch } = await epochStore.status()
     const adapter = createActiveVaultAdapter()
     const result = await migrateToSchema2(adapter, {
       onProgress: (progress) => {
@@ -471,16 +479,14 @@ const runVaultMigration = async () => {
     })
     await refreshPreviousV1RecordIds()
 
+    const skipped =
+      !(result.complete || result.alreadyMigrated) && adapter.skipIds.size > 0
+    if (skipped) skippedAtEpoch = epoch
     // Rows it skipped under a latest epoch it cannot open yet: nothing was
-    // written, so no write threw, but the key that reads them may come with
-    // the next rotation. Under a readable latest epoch a skipped row stays
-    // unreadable, so that run ends as incomplete and is not run again.
-    // Both reads: a key can land during the listing, or an epoch without me.
-    if (
-      !(result.complete || result.alreadyMigrated) &&
-      adapter.skipIds.size > 0 &&
-      (!canRead || !(await epochStore.status()).canRead)
-    ) {
+    // written, so no write threw. Under a readable latest epoch it ends as
+    // incomplete instead. Both reads: a key can land during the listing, or
+    // an epoch without me.
+    if (skipped && (!canRead || !(await epochStore.status()).canRead)) {
       migrationDeferred = true
       vaultMigrationStatus = {
         ready: false,
@@ -586,17 +592,22 @@ const runEpochSync = async ({ ensure }) => {
     }
   }
   try {
+    const resume = async () => {
+      if (!migrationDeferred && skippedAtEpoch === undefined) return false
+      const { canRead, epoch } = await store.status()
+      return canRead && (migrationDeferred || epoch !== skippedAtEpoch)
+    }
     if (
-      migrationDeferred &&
-      (await store.status()).canRead &&
+      (await resume()) &&
       store === epochStore &&
       activeVaultInstance?.base?.writable
     ) {
-      // Cleared first, because the migration sets it again when the run
-      // defers. A device that can read and write but still cannot
-      // rotate (its own row is gone, say) defers again and reruns on each
-      // update; the run stops at its first write, so that is accepted.
+      // Cleared first, because the migration sets them again when the run
+      // defers or skips rows. A device that can read and write but still
+      // cannot rotate (its own row is gone, say) defers again and reruns on
+      // each update; the run stops at its first write, so that is accepted.
       migrationDeferred = false
+      skippedAtEpoch = undefined
       // runVaultMigration logs and records its own failure.
       await runVaultMigration().catch(() => {})
     }

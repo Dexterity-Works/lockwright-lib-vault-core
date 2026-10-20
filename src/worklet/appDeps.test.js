@@ -1803,6 +1803,41 @@ describe('appDeps module functions (excluding encryption)', () => {
           migratedToSchema: 2
         })
       })
+
+      test('resumes when a rotation carries the key of a losing fork', async () => {
+        const { id: mine } = await appDeps.activeVaultEnsureEpoch({
+          start: true
+        })
+        vault.put('record/r1', v1Record)
+        const v2 = JSON.stringify(convertV1RecordToV2(JSON.parse(v1Record)))
+        // Two epochs at seq 2: the losing one leaves me out and seals the
+        // record's v2 row, the winning one is sealed to me.
+        const lost = putForeignEpoch(2, mine)
+        vault.put(
+          'record-v2/r1',
+          encryptValue(lost, foreignKeys.get(lost), v2).envelope
+        )
+        const won = putForeignEpoch(2, mine, { withMe: true })
+        await reopen()
+        expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+          epoch: won,
+          canRead: true
+        })
+        expect(appDeps.getVaultMigrationStatus()).toMatchObject({
+          ready: false,
+          deferred: false,
+          error: 'Migration incomplete'
+        })
+        const fireUpdate = await listen()
+
+        putForeignEpoch(3, won, { withMe: true, carry: [lost] })
+        await fireUpdate()
+        await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+        expect(appDeps.getVaultMigrationStatus()).toMatchObject({
+          error: null,
+          migratedToSchema: 2
+        })
+      })
     })
 
     test('pushes the status as it stands after a resumed migration', async () => {

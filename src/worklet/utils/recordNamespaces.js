@@ -447,8 +447,8 @@ export const migrateToSchema2 = async (vault, options = {}) => {
   for (const [id, v1Record] of v1Records) {
     const existingV2 = v2Records.get(id)
     if (skipIds.has(id)) {
-      // Left incomplete. The app runs it again once a rotation lets this
-      // device open the latest epoch, and not while it can already open it.
+      // Left incomplete. The app runs it again on the next latest epoch this
+      // device can open, which may carry the row's key.
     } else if (!existingV2) {
       const v2 = convertV1RecordToV2(v1Record)
       await vault.addJson(recordKeyV2(id), v2)
