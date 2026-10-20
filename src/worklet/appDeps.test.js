@@ -1718,7 +1718,7 @@ describe('appDeps module functions (excluding encryption)', () => {
         })
       })
 
-      test('defers when the key lands between its listing and its status read', async () => {
+      test('resumes when the key lands during its listing', async () => {
         const first = putForeignEpoch()
         vault.put('record/r1', v1Record)
         vault.put('record-v2/r1', unreadable)
@@ -1764,6 +1764,44 @@ describe('appDeps module functions (excluding encryption)', () => {
 
         await fireUpdate()
         expect(appDeps.getVaultMigrationStatus().lastResult).toBe(lastResult)
+      })
+
+      test('resumes when an epoch that leaves it out lands during its listing', async () => {
+        const { id: mine } = await appDeps.activeVaultEnsureEpoch({
+          start: true
+        })
+        vault.put('record/r1', v1Record)
+        const v2 = JSON.stringify(convertV1RecordToV2(JSON.parse(v1Record)))
+        // As the record listing starts, another device rotates without me
+        // and writes the record's v2 row under its new epoch.
+        let second = null
+        const wrap = (instance) => {
+          const find = instance.base.view.find
+          instance.base.view.find = jest.fn((view, range) => {
+            if (!range?.gte && !second) {
+              second = putForeignEpoch(2, mine)
+              vault.put(
+                'record-v2/r1',
+                encryptValue(second, foreignKeys.get(second), v2).envelope
+              )
+              instance.emit('update')
+            }
+            return find(view, range)
+          })
+        }
+        await reopen({ wrap })
+        expect(second).not.toBeNull()
+        stillDeferred()
+        const fireUpdate = await listen()
+
+        putForeignEpoch(3, second, { withMe: true, carry: [second] })
+        await fireUpdate()
+        await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+        expect(appDeps.getVaultMigrationStatus()).toMatchObject({
+          deferred: false,
+          error: null,
+          migratedToSchema: 2
+        })
       })
     })
 

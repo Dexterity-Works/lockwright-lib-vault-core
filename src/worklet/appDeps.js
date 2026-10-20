@@ -475,10 +475,11 @@ const runVaultMigration = async () => {
     // written, so no write threw, but the key that reads them may come with
     // the next rotation. Under a readable latest epoch a skipped row stays
     // unreadable, so that run ends as incomplete and is not run again.
+    // Both reads: a key can land during the listing, or an epoch without me.
     if (
       !(result.complete || result.alreadyMigrated) &&
       adapter.skipIds.size > 0 &&
-      !canRead
+      (!canRead || !(await epochStore.status()).canRead)
     ) {
       migrationDeferred = true
       vaultMigrationStatus = {
