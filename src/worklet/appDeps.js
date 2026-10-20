@@ -101,8 +101,9 @@ let migrationDeferred = false
 // The latest epoch, read before its listing, of a run that ended incomplete
 // with rows it could not read. runEpochSync runs it again on a new latest
 // epoch it can open, since a rotation may carry their key: once per
-// rotation, not per update. A key that only a losing fork record carries,
-// with no new latest, waits for the next open.
+// rotation, not per update. A key that is truly lost costs one full rerun
+// per rotation. A key that only a losing fork record carries, with no new
+// latest, waits for the next open.
 let skippedAtEpoch
 const EPOCH_KEY_PENDING = 'epoch-key-pending'
 
@@ -447,11 +448,15 @@ const getReadableRecord = async (recordId) => {
   return getRawRecordPreferV2(createActiveVaultAdapter(), recordId)
 }
 
-const refreshPreviousV1RecordIds = async () => {
+// Ids seen before and in `skipIds` now stay, as in runIncrementalReconcile,
+// so a v1 delete made while their rows were unreadable is still mirrored.
+const refreshPreviousV1RecordIds = async (skipIds) => {
+  const kept = [...previousV1RecordIds].filter((id) => skipIds.has(id))
   const entries = await collectActiveVaultEntries(isV1RecordKey)
-  previousV1RecordIds = new Set(
-    entries.map(({ key }) => parseRecordIdFromKey(key)).filter(Boolean)
-  )
+  previousV1RecordIds = new Set([
+    ...entries.map(({ key }) => parseRecordIdFromKey(key)).filter(Boolean),
+    ...kept
+  ])
 }
 
 const runVaultMigration = async () => {
@@ -477,7 +482,7 @@ const runVaultMigration = async () => {
         }
       }
     })
-    await refreshPreviousV1RecordIds()
+    await refreshPreviousV1RecordIds(adapter.skipIds)
 
     const skipped =
       !(result.complete || result.alreadyMigrated) && adapter.skipIds.size > 0

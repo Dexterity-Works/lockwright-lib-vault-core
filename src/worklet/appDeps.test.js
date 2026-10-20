@@ -1810,8 +1810,10 @@ describe('appDeps module functions (excluding encryption)', () => {
         })
         vault.put('record/r1', v1Record)
         const v2 = JSON.stringify(convertV1RecordToV2(JSON.parse(v1Record)))
-        // Two epochs at seq 2: the losing one leaves me out and seals the
-        // record's v2 row, the winning one is sealed to me.
+        // Two epochs at seq 2. The first leaves me out and seals the
+        // record's v2 row; its author then leaves the roster (the next
+        // putForeignEpoch replaces device/other), so it is not accepted.
+        // The second is sealed to me and is the latest.
         const lost = putForeignEpoch(2, mine)
         vault.put(
           'record-v2/r1',
@@ -2226,6 +2228,32 @@ describe('appDeps module functions (excluding encryption)', () => {
           epoch: null,
           canRead: true
         })
+        expect(vault.rows.has('record-v2/r1')).toBe(false)
+      })
+
+      test('mirrors a v1 delete made while a migration rerun could not read it', async () => {
+        const { id: mine } = await appDeps.activeVaultEnsureEpoch({
+          start: true
+        })
+        vault.put('record/r1', JSON.stringify(v1))
+        // r2 leaves the migration incomplete, so a new epoch reruns it.
+        vault.put('record/r2', JSON.stringify({ ...v1, id: 'r2' }))
+        vault.put('record-v2/r2', unreadable)
+        await reopen()
+        expect(vault.rows.has('record-v2/r1')).toBe(true)
+        const { lastResult } = appDeps.getVaultMigrationStatus()
+        const fireUpdate = await listen()
+        vault.put('record/r1', unreadable)
+        await fireUpdate()
+
+        putForeignEpoch(2, mine, { withMe: true })
+        await fireUpdate()
+        expect(appDeps.getVaultMigrationStatus().lastResult).not.toBe(
+          lastResult
+        )
+        vault.rows.delete('record/r1')
+        await fireUpdate()
+
         expect(vault.rows.has('record-v2/r1')).toBe(false)
       })
 
