@@ -95,8 +95,8 @@ let vaultMigrationStatus = {
   lastResult: null,
   progress: null
 }
-// The migration waits for this device to write the epoch: runEpochSync
-// runs it again once it can.
+// The migration waits for this device to read or write the latest epoch:
+// runEpochSync runs it again once it can.
 let migrationDeferred = false
 const EPOCH_KEY_PENDING = 'epoch-key-pending'
 
@@ -120,9 +120,10 @@ const rateLimiter = new RateLimiter()
 
 /**
  * UI can wait on migrate completeness before listing records.
- * `deferred`: waiting until this device can write the epoch. `error` is then
- * `EPOCH_KEY_PENDING`, so a gate that fails open on `error && !inProgress`
- * does not wait out its timeout; the resume clears both.
+ * `deferred`: waiting until this device can read or write the epoch. `error`
+ * is then `EPOCH_KEY_PENDING`, so a gate that fails open on
+ * `error && !inProgress` does not wait out its timeout; the resume clears
+ * both.
  * @returns {{ ready: boolean, inProgress: boolean, deferred: boolean, migratedToSchema: number|null, error: string|null, lastResult: object|null, progress: { done: number, total: number }|null }}
  */
 export const getVaultMigrationStatus = () => ({ ...vaultMigrationStatus })
@@ -467,6 +468,27 @@ const runVaultMigration = async () => {
     })
     await refreshPreviousV1RecordIds()
 
+    // Rows it skipped under a latest epoch it cannot open yet: nothing was
+    // written, so no write threw, but the key that reads them may come with
+    // the next rotation. Under a readable latest epoch a skipped row stays
+    // unreadable, so that run ends as incomplete and is not run again.
+    if (
+      !(result.complete || result.alreadyMigrated) &&
+      adapter.skipIds.size > 0 &&
+      !(await epochStore.status()).canRead
+    ) {
+      migrationDeferred = true
+      vaultMigrationStatus = {
+        ready: false,
+        inProgress: false,
+        deferred: true,
+        migratedToSchema: null,
+        error: EPOCH_KEY_PENDING,
+        lastResult: result
+      }
+      return
+    }
+
     const vaultExt = (await activeVaultGetRaw(VAULT_EXT_KEY)) || {}
     vaultMigrationStatus = {
       ready: result.complete || result.alreadyMigrated,
@@ -566,8 +588,8 @@ const runEpochSync = async ({ ensure }) => {
       store === epochStore &&
       activeVaultInstance?.base?.writable
     ) {
-      // Cleared first, because the migration's catch sets it again when
-      // the run defers. A device that can read and write but still cannot
+      // Cleared first, because the migration sets it again when the run
+      // defers. A device that can read and write but still cannot
       // rotate (its own row is gone, say) defers again and reruns on each
       // update; the run stops at its first write, so that is accepted.
       migrationDeferred = false

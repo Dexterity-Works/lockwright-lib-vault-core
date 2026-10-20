@@ -1679,6 +1679,43 @@ describe('appDeps module functions (excluding encryption)', () => {
         await new Promise((resolve) => setTimeout(resolve, 100))
         stillDeferred()
       })
+
+      // Nothing is written, so no write fails on the missing key.
+      test('defers on a skipped row while the latest epoch is out of reach', async () => {
+        const first = putForeignEpoch()
+        vault.put('record/r1', v1Record)
+        vault.put('record-v2/r1', unreadable)
+        await reopen()
+        stillDeferred()
+        const fireUpdate = await listen()
+
+        putForeignEpoch(2, first, { withMe: true })
+        vault.rows.delete('record-v2/r1')
+        await fireUpdate()
+        await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+        expect(appDeps.getVaultMigrationStatus()).toMatchObject({
+          deferred: false,
+          error: null,
+          migratedToSchema: 2
+        })
+      })
+
+      test('does not defer on a skipped row under a readable latest epoch', async () => {
+        await appDeps.activeVaultEnsureEpoch({ start: true })
+        vault.put('record/r1', v1Record)
+        vault.put('record-v2/r1', unreadable)
+        await reopen()
+        const { lastResult } = appDeps.getVaultMigrationStatus()
+        expect(appDeps.getVaultMigrationStatus()).toMatchObject({
+          ready: false,
+          deferred: false,
+          error: 'Migration incomplete'
+        })
+        const fireUpdate = await listen()
+
+        await fireUpdate()
+        expect(appDeps.getVaultMigrationStatus().lastResult).toBe(lastResult)
+      })
     })
 
     test('pushes the status as it stands after a resumed migration', async () => {
