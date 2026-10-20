@@ -457,6 +457,9 @@ const runVaultMigration = async () => {
   }
 
   try {
+    // Read before the listing: a key that lands after it would make rows
+    // the listing skipped look permanently unreadable.
+    const { canRead } = await epochStore.status()
     const adapter = createActiveVaultAdapter()
     const result = await migrateToSchema2(adapter, {
       onProgress: (progress) => {
@@ -475,7 +478,7 @@ const runVaultMigration = async () => {
     if (
       !(result.complete || result.alreadyMigrated) &&
       adapter.skipIds.size > 0 &&
-      !(await epochStore.status()).canRead
+      !canRead
     ) {
       migrationDeferred = true
       vaultMigrationStatus = {

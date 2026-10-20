@@ -274,6 +274,7 @@ import * as appDeps from './appDeps'
 import { buildEpochRecord, generateEpochId } from './epoch/epochRecord'
 import { isPlaintextKey } from './epoch/epochStore'
 import {
+  encryptValue,
   EpochRotationPendingError,
   generateEpochKey,
   sealCheck,
@@ -282,6 +283,7 @@ import {
   verifyDeviceRow,
   writeErrorMessage
 } from './epoch/keyring'
+import { convertV1RecordToV2 } from './utils/recordNamespaces'
 
 const mockSodium = require('sodium-native')
 
@@ -1174,8 +1176,8 @@ describe('appDeps module functions (excluding encryption)', () => {
     }
 
     // Close the active vault and open it again over the same rows, so its
-    // migration runs over them.
-    const reopen = async ({ writable = true } = {}) => {
+    // migration runs over them. `wrap` gets the new instance before it opens.
+    const reopen = async ({ writable = true, wrap } = {}) => {
       const { rows } = vault
       await appDeps.closeActiveVaultInstance()
       const make = Autopass.getMockImplementation()
@@ -1183,6 +1185,7 @@ describe('appDeps module functions (excluding encryption)', () => {
         const instance = make(...args)
         vault = useMemoryVault(instance, rows)
         instance.base.writable = writable
+        wrap?.(instance)
         return instance
       })
       await appDeps.initActiveVaultInstance({
@@ -1198,9 +1201,17 @@ describe('appDeps module functions (excluding encryption)', () => {
       c: 'AA=='
     })
 
+    // The keys of the epochs putForeignEpoch wrote, by epoch id.
+    const foreignKeys = new Map()
+
     // A rostered device `other` writes epoch `seq` after `prev`, sealed to
-    // itself only, or to me as well.
-    const putForeignEpoch = (seq = 1, prev = null, { withMe = false } = {}) => {
+    // itself only, or to me as well. `carry` names earlier foreign epochs
+    // whose keys its ring holds too.
+    const putForeignEpoch = (
+      seq = 1,
+      prev = null,
+      { withMe = false, carry = [] } = {}
+    ) => {
       const other = makeSignKeyPair()
       const rows = [
         { id: 'other', masterTopic: other.publicKey.toString('hex') }
@@ -1210,7 +1221,11 @@ describe('appDeps module functions (excluding encryption)', () => {
       vault.put('device/other', deviceRow('other', other))
       const id = generateEpochId()
       const key = generateEpochKey()
-      const boxes = sealRing({ [id]: key }, rows)
+      foreignKeys.set(id, key)
+      const ring = Object.fromEntries(
+        carry.map((earlier) => [earlier, foreignKeys.get(earlier)])
+      )
+      const boxes = sealRing({ ...ring, [id]: key }, rows)
       const record = buildEpochRecord({
         id,
         seq,
@@ -1684,13 +1699,16 @@ describe('appDeps module functions (excluding encryption)', () => {
       test('defers on a skipped row while the latest epoch is out of reach', async () => {
         const first = putForeignEpoch()
         vault.put('record/r1', v1Record)
-        vault.put('record-v2/r1', unreadable)
+        const v2 = JSON.stringify(convertV1RecordToV2(JSON.parse(v1Record)))
+        vault.put(
+          'record-v2/r1',
+          encryptValue(first, foreignKeys.get(first), v2).envelope
+        )
         await reopen()
         stillDeferred()
         const fireUpdate = await listen()
 
-        putForeignEpoch(2, first, { withMe: true })
-        vault.rows.delete('record-v2/r1')
+        putForeignEpoch(2, first, { withMe: true, carry: [first] })
         await fireUpdate()
         await waitFor(() => appDeps.getVaultMigrationStatus().ready)
         expect(appDeps.getVaultMigrationStatus()).toMatchObject({
@@ -1698,6 +1716,37 @@ describe('appDeps module functions (excluding encryption)', () => {
           error: null,
           migratedToSchema: 2
         })
+      })
+
+      test('defers when the key lands between its listing and its status read', async () => {
+        const first = putForeignEpoch()
+        vault.put('record/r1', v1Record)
+        vault.put('record-v2/r1', unreadable)
+        // Once a scan has listed the unreadable row, a rotation sealed to me
+        // lands, the row goes away and the view moves.
+        let landed = false
+        const wrap = (instance) => {
+          const find = instance.base.view.find
+          instance.base.view.find = jest.fn((...args) => ({
+            async *[Symbol.asyncIterator]() {
+              let listed = false
+              for await (const row of find(...args)) {
+                if (row.key === 'record-v2/r1') listed = true
+                yield row
+              }
+              if (listed && !landed) {
+                landed = true
+                putForeignEpoch(2, first, { withMe: true })
+                vault.rows.delete('record-v2/r1')
+                instance.emit('update')
+              }
+            }
+          }))
+        }
+        await reopen({ wrap })
+
+        expect(landed).toBe(true)
+        await waitFor(() => appDeps.getVaultMigrationStatus().ready)
       })
 
       test('does not defer on a skipped row under a readable latest epoch', async () => {
