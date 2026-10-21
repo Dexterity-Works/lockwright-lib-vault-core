@@ -2204,4 +2204,32 @@ describe('epochStore over real Autopass', () => {
     expect(await value(C, 'record/fresh')).toBeNull()
     expect(await value(B, 'record/fresh')).toBe('from A')
   })
+
+  it('keeps a puppet writer the kicked device added as a member until it is kicked too', async () => {
+    const [A, B, C] = await setup()
+    // Before its removal lands, C adds writer P and P's bound row.
+    const P = await makePeer('P', A)
+    await C.instance.addWriter(P.instance.writerKey)
+    await addDevice(C, P.row)
+    await sync(A, B, C, P)
+
+    expect(await kick(A, C)).toMatchObject({
+      rotated: true,
+      members: ['A', 'B', 'P']
+    })
+    await A.store.add('record/1', 'v1')
+    await sync(A, B, C, P)
+    expect((await A.store.status()).members).toEqual(['A', 'B', 'P'])
+    expect(await value(P, 'record/1')).toBe('v1')
+
+    expect(await kick(A, P)).toMatchObject({
+      rotated: true,
+      members: ['A', 'B']
+    })
+    await A.store.add('record/2', 'v2')
+    await sync(A, B, C, P)
+    expect((await A.store.status()).members).toEqual(['A', 'B'])
+    expect(await value(B, 'record/2')).toBe('v2')
+    expect(await value(P, 'record/2')).toBeNull()
+  })
 })
