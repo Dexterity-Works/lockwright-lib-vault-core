@@ -2232,4 +2232,19 @@ describe('epochStore over real Autopass', () => {
     expect(await value(B, 'record/2')).toBe('v2')
     expect(await value(P, 'record/2')).toBeNull()
   })
+
+  it('reads plaintext an older build writes once an epoch exists', async () => {
+    const [A, B, C] = await setup()
+    await kick(A, C)
+    await sync(A, B, C)
+
+    // An older build of B writes through Autopass, not the store.
+    await B.instance.add('record/old', 'from an old build')
+    await sync(A, B, C)
+
+    expect((await A.instance.get('record/old')).value).toBe('from an old build')
+    expect(await value(A, 'record/old')).toBe('from an old build')
+    // The kicked device reads it too.
+    expect(await value(C, 'record/old')).toBe('from an old build')
+  })
 })
