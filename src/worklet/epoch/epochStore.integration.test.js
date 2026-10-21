@@ -2186,4 +2186,22 @@ describe('epochStore over real Autopass', () => {
     expect(await value(C, 'vault-ext')).toBe('{"migratedToSchema":2}')
     expect((await rawEnvelope(A, 'vault-extra')).$enc).toBe(1)
   })
+
+  it('leaves a record readable to the kicked device when its writer had not seen the kick', async () => {
+    const [A, B, C] = await setup()
+    const first = await A.store.ensureEpoch({ start: true })
+    await sync(A, B, C)
+
+    // B does not sync the kick before it writes.
+    await kick(A, C)
+    await B.store.add('record/stale', 'from B')
+    await A.store.add('record/fresh', 'from A')
+    await sync(A, B, C)
+
+    // B's roster still listed C, so B wrote under the epoch C holds.
+    expect((await rawEnvelope(C, 'record/stale')).e).toBe(first.id)
+    expect(await value(C, 'record/stale')).toBe('from B')
+    expect(await value(C, 'record/fresh')).toBeNull()
+    expect(await value(B, 'record/fresh')).toBe('from A')
+  })
 })
