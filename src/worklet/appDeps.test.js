@@ -1194,6 +1194,52 @@ describe('appDeps module functions (excluding encryption)', () => {
       })
     }
 
+    // Hold the next full listing of the active vault until the returned
+    // release runs. `when` picks which listing.
+    const holdListing = (when = () => true) => {
+      const { view } = appDeps.getActiveVaultInstance().base
+      const find = view.find
+      let release
+      const gate = new Promise((resolve) => {
+        release = resolve
+      })
+      const held = { listed: false, release: () => release() }
+      view.find = jest.fn((name, range) => {
+        const rows = find(name, range)
+        if (held.listed || range?.gte || range?.lt || !when()) return rows
+        held.listed = true
+        return {
+          async *[Symbol.asyncIterator]() {
+            await gate
+            yield* rows
+          }
+        }
+      })
+      return held
+    }
+
+    // Close the active vault and open vault2, migrated already, so opening
+    // it writes nothing. Returns vault2's add, cleared.
+    const openMigratedVault2 = async () => {
+      await appDeps.closeActiveVaultInstance()
+      const make = Autopass.getMockImplementation()
+      let add
+      Autopass.mockImplementationOnce((...args) => {
+        const next = make(...args)
+        const vault2 = useMemoryVault(next)
+        vault2.put('device/me', deviceRow('me', me, next.base.local.keyPair))
+        vault2.put('vault-ext', JSON.stringify({ migratedToSchema: 2 }))
+        add = next.add
+        return next
+      })
+      await appDeps.initActiveVaultInstance({
+        id: 'vault2',
+        encryptionKey: 'key'
+      })
+      add.mockClear()
+      return add
+    }
+
     const unreadable = JSON.stringify({
       $enc: 1,
       e: 'ff'.repeat(16),
@@ -1695,6 +1741,35 @@ describe('appDeps module functions (excluding encryption)', () => {
         stillDeferred()
       })
 
+      test('stops a resume when another vault opens mid-run', async () => {
+        const first = putForeignEpoch()
+        vault.put('record/r1', v1Record)
+        await reopen()
+        stillDeferred()
+        const fireUpdate = await listen()
+
+        // Only the resume's listing waits: the reconcile and the epoch reads
+        // go on.
+        const held = holdListing(
+          () => appDeps.getVaultMigrationStatus().inProgress
+        )
+        putForeignEpoch(2, first, { withMe: true })
+        await fireUpdate()
+        await waitFor(() => held.listed)
+
+        const vault2Add = await openMigratedVault2()
+        const vault2Status = appDeps.getVaultMigrationStatus()
+        expect(vault2Status).toMatchObject({
+          ready: true,
+          lastResult: { alreadyMigrated: true }
+        })
+
+        held.release()
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        expect(vault2Add).not.toHaveBeenCalled()
+        expect(appDeps.getVaultMigrationStatus()).toEqual(vault2Status)
+      })
+
       // Nothing is written, so no write fails on the missing key.
       test('defers on a skipped row while the latest epoch is out of reach', async () => {
         const first = putForeignEpoch()
@@ -2133,6 +2208,22 @@ describe('appDeps module functions (excluding encryption)', () => {
         expect(vault.rows.has('record-v2/r1')).toBe(true)
         return fireUpdate
       }
+
+      test('writes nothing into a vault opened mid-run', async () => {
+        await listen()
+        await appDeps.activeVaultEnsureEpoch({ start: true })
+        const instance = appDeps.getActiveVaultInstance()
+        const held = holdListing()
+        vault.put('record/r1', JSON.stringify(v1))
+        instance.emit('update')
+        await waitFor(() => held.listed)
+
+        const vault2Add = await openMigratedVault2()
+        held.release()
+        await new Promise((resolve) => setTimeout(resolve, 100))
+
+        expect(vault2Add).not.toHaveBeenCalled()
+      })
 
       test('mirrors a v1 delete to v2 when every record is readable', async () => {
         const fireUpdate = await seenRecord()

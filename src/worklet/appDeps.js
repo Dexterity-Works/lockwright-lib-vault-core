@@ -326,11 +326,16 @@ export const collectValuesByFilter = async (instance, filterFn) => {
  * Records the store cannot read are left out and passed to onUnreadable.
  * @param {Function} [filterFn]
  * @param {(key: string) => void} [onUnreadable]
+ * @param {ReturnType<typeof createEpochStore>} [store]
  * @returns {Promise<Array<{ key: string, value: any }>>}
  */
-const collectActiveVaultEntries = async (filterFn, onUnreadable) => {
+const collectActiveVaultEntries = async (
+  filterFn,
+  onUnreadable,
+  store = epochStore
+) => {
   const results = []
-  for (const { key, value } of await epochStore.find({ onUnreadable })) {
+  for (const { key, value } of await store.find({ onUnreadable })) {
     if (!value || (filterFn && !filterFn(key))) continue
 
     let parsedValue
@@ -379,19 +384,31 @@ const listMergedRecords = async () => {
 const recordIdOfKey = (key) =>
   parseRecordIdFromKey(key) ?? parseFileKey(key)?.recordId ?? null
 
+const ACTIVE_VAULT_CHANGED = 'Active vault changed'
+
 /**
  * `listEntries` leaves out rows this device cannot read and collects them:
  * `unreadableKeys` holds their keys, `skipIds` their record ids. Treating
  * such a row as missing would seal stale content over it.
+ * Bound to the store active when it is made: a write after another vault
+ * opened throws instead of landing in that vault.
+ * @param {ReturnType<typeof createEpochStore>} [store]
  * @returns {import('./utils/recordNamespaces.js').VaultAdapter & { unreadableKeys: Set<string> }}
  */
-const createActiveVaultAdapter = () => {
+const createActiveVaultAdapter = (store = epochStore) => {
   const unreadableKeys = new Set()
   const skipIds = new Set()
+  const assertActive = () => {
+    if (store !== epochStore) throw new Error(ACTIVE_VAULT_CHANGED)
+  }
   return {
-    getJson: activeVaultGetRaw,
+    getJson: async (key) => {
+      const res = await store.get(key)
+      if (!res || !res.value) return null
+      return JSON.parse(res.value)
+    },
     getWithFile: async (key) => {
-      const res = await epochStore.get(key)
+      const res = await store.get(key)
       if (!res) return { value: null, file: null }
       let value = null
       if (res.value) {
@@ -404,17 +421,23 @@ const createActiveVaultAdapter = () => {
       return { value, file: res.file || null }
     },
     addJson: async (key, data, file = null) => {
-      await epochStore.add(key, JSON.stringify(data), file || undefined)
+      assertActive()
+      await store.add(key, JSON.stringify(data), file || undefined)
     },
     remove: async (key) => {
-      await epochStore.remove(key)
+      assertActive()
+      await store.remove(key)
     },
     listEntries: async () =>
-      collectActiveVaultEntries(undefined, (key) => {
-        unreadableKeys.add(key)
-        const id = recordIdOfKey(key)
-        if (id) skipIds.add(id)
-      }),
+      collectActiveVaultEntries(
+        undefined,
+        (key) => {
+          unreadableKeys.add(key)
+          const id = recordIdOfKey(key)
+          if (id) skipIds.add(id)
+        },
+        store
+      ),
     unreadableKeys,
     skipIds
   }
@@ -450,16 +473,24 @@ const getReadableRecord = async (recordId) => {
 
 // Ids seen before and in `skipIds` now stay, as in runIncrementalReconcile,
 // so a v1 delete made while their rows were unreadable is still mirrored.
-const refreshPreviousV1RecordIds = async (skipIds) => {
+const refreshPreviousV1RecordIds = async (skipIds, store) => {
+  const entries = await collectActiveVaultEntries(
+    isV1RecordKey,
+    undefined,
+    store
+  )
+  if (store !== epochStore) return
   const kept = [...previousV1RecordIds].filter((id) => skipIds.has(id))
-  const entries = await collectActiveVaultEntries(isV1RecordKey)
   previousV1RecordIds = new Set([
     ...entries.map(({ key }) => parseRecordIdFromKey(key)).filter(Boolean),
     ...kept
   ])
 }
 
-const runVaultMigration = async () => {
+// Runs over `store` only. Once another vault opened it stops and leaves
+// the shared migration state to that vault.
+const runVaultMigration = async (store = epochStore) => {
+  const switched = () => store !== epochStore
   skippedAtEpoch = undefined
   vaultMigrationStatus = {
     ...vaultMigrationStatus,
@@ -472,17 +503,19 @@ const runVaultMigration = async () => {
   try {
     // Read before the listing: a key that lands after it would make rows
     // the listing skipped look permanently unreadable.
-    const { canRead, epoch } = await epochStore.status()
-    const adapter = createActiveVaultAdapter()
+    const { canRead, epoch } = await store.status()
+    const adapter = createActiveVaultAdapter(store)
     const result = await migrateToSchema2(adapter, {
       onProgress: (progress) => {
+        if (switched()) return
         vaultMigrationStatus = {
           ...vaultMigrationStatus,
           progress
         }
       }
     })
-    await refreshPreviousV1RecordIds(adapter.skipIds)
+    await refreshPreviousV1RecordIds(adapter.skipIds, store)
+    if (switched()) return
 
     const skipped =
       !(result.complete || result.alreadyMigrated) && adapter.skipIds.size > 0
@@ -491,7 +524,8 @@ const runVaultMigration = async () => {
     // written, so no write threw. Under a readable latest epoch it ends as
     // incomplete instead. Both reads: a key can land during the listing, or
     // an epoch without me.
-    if (skipped && (!canRead || !(await epochStore.status()).canRead)) {
+    if (skipped && (!canRead || !(await store.status()).canRead)) {
+      if (switched()) return
       migrationDeferred = true
       vaultMigrationStatus = {
         ready: false,
@@ -504,7 +538,8 @@ const runVaultMigration = async () => {
       return
     }
 
-    const vaultExt = (await activeVaultGetRaw(VAULT_EXT_KEY)) || {}
+    const vaultExt = (await adapter.getJson(VAULT_EXT_KEY)) || {}
+    if (switched()) return
     vaultMigrationStatus = {
       ready: result.complete || result.alreadyMigrated,
       inProgress: false,
@@ -521,6 +556,7 @@ const runVaultMigration = async () => {
       progress: vaultMigrationStatus.progress
     }
   } catch (error) {
+    if (switched()) return
     // A device not yet in the latest epoch, or one that cannot rotate an
     // epoch that still lists a removed device, cannot write yet.
     migrationDeferred =
@@ -546,9 +582,10 @@ const runVaultMigration = async () => {
 const runIncrementalReconcile = async () => {
   if (!isActiveVaultInitialized || !activeVaultInstance) return
 
-  const vaultExt = (await activeVaultGetRaw(VAULT_EXT_KEY)) || {}
-  const { canRead } = await epochStore.status()
-  const listing = createActiveVaultAdapter()
+  const store = epochStore
+  const listing = createActiveVaultAdapter(store)
+  const vaultExt = (await listing.getJson(VAULT_EXT_KEY)) || {}
+  const { canRead } = await store.status()
   const entries = await listing.listEntries()
   const adapter = { ...listing, listEntries: async () => entries }
   // A v1 record this device cannot read looks deleted; mirroring that
@@ -559,6 +596,7 @@ const runIncrementalReconcile = async () => {
     previousV1Ids: previousV1RecordIds,
     blockV1DeleteMirror: vaultExt.blockV1DeleteMirror === true || !canRead
   })
+  if (store !== epochStore) return
   // Keep the ids seen before but skipped now, so a v1 delete made meanwhile
   // is mirrored once this device can read the record again.
   const kept = canRead
@@ -614,7 +652,7 @@ const runEpochSync = async ({ ensure }) => {
       migrationDeferred = false
       skippedAtEpoch = undefined
       // runVaultMigration logs and records its own failure.
-      await runVaultMigration().catch(() => {})
+      await runVaultMigration(store).catch(() => {})
     }
     // Read after the resume: a rotation the migration made, or one that
     // landed meanwhile, is pushed now, not on the next update.
