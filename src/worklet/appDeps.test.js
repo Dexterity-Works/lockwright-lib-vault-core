@@ -2099,6 +2099,80 @@ describe('appDeps module functions (excluding encryption)', () => {
       expect(pushes[0]).toMatchObject({ vaultId: 'vault1', members: ['me'] })
     })
 
+    describe('a lock during the first kick of a legacy vault', () => {
+      const OWED = 'lockwright/epoch-start-owed'
+      let userData
+
+      beforeEach(() => {
+        userData = appDeps.getActiveVaultInstance().base.local.userData
+      })
+
+      // The local core outlives the lock, so its user data does too.
+      const keepUserData = (instance) => {
+        instance.base.local.userData = userData
+      }
+
+      test('drops a kick rotation that reaches the worklet after the lock until the next start', async () => {
+        let late
+        await reopen({
+          wrap: (instance) => {
+            keepUserData(instance)
+            // Locked: the kick's rotation call arrives before the unlock.
+            late = expect(
+              appDeps.activeVaultEnsureEpoch({ start: true })
+            ).rejects.toThrow('Vault not initialised')
+          }
+        })
+        await late
+        expect(userData.has(OWED)).toBe(false)
+
+        const fireUpdate = await listen()
+        await fireUpdate()
+        expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+          legacy: true
+        })
+
+        // The next kick or leave starts it.
+        expect(
+          await appDeps.activeVaultEnsureEpoch({ start: true })
+        ).toMatchObject({ rotated: true, seq: 1 })
+        expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+          legacy: false
+        })
+      })
+
+      test('owes a kick rotation the lock broke and pays it on the first update after the unlock', async () => {
+        // The lock closes the vault under the rotation's epoch append.
+        const instance = appDeps.getActiveVaultInstance()
+        const add = instance.add
+        instance.add = jest.fn(async (key, ...rest) => {
+          if (key.startsWith('epoch/')) throw new Error('closed')
+          return add(key, ...rest)
+        })
+        await expect(
+          appDeps.activeVaultEnsureEpoch({ start: true })
+        ).rejects.toThrow('closed')
+        expect(userData.get(OWED)?.toString()).toBe('1')
+
+        // Opening does not pay it.
+        await reopen({ wrap: keepUserData })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+          legacy: true
+        })
+        expect(userData.get(OWED)?.toString()).toBe('1')
+
+        const fireUpdate = await listen()
+        await fireUpdate()
+        expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+          legacy: false,
+          seq: 1,
+          members: ['me']
+        })
+        expect(userData.get(OWED)?.toString()).toBe('0')
+      })
+    })
+
     describe('record routing under an epoch', () => {
       const secrets = ['hunter2-secret', 'note-secret', 'JBSWY3DPEHPK3PXP']
       const fileBytes = 'attachment-secret'
