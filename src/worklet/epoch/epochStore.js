@@ -291,15 +291,16 @@ export const createEpochStore = ({
     }
     if (epochSeen && !epochSeenStored) {
       epochSeenStored = true
-      // Not awaited: this run already holds the flag in memory.
-      instance.base.local
-        .setUserData(EPOCH_SEEN, Buffer.from('1'))
-        .catch((error) => {
-          epochSeenStored = false
-          logger.warn('epochStore: could not persist the epoch mode', {
-            error: error?.name
-          })
+      // A failed write does not fail the refresh: this run holds the flag
+      // in memory, and the next refresh retries.
+      try {
+        await instance.base.local.setUserData(EPOCH_SEEN, Buffer.from('1'))
+      } catch (error) {
+        epochSeenStored = false
+        logger.warn('epochStore: could not persist the epoch mode', {
+          error: error?.name
         })
+      }
     }
 
     ring = nextRing
