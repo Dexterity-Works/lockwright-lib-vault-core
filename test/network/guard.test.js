@@ -61,6 +61,23 @@ describe('public-DHT guard', () => {
     ).toThrow(/not local/)
   })
 
+  test('an address this host owns counts as local', async () => {
+    const os = await import('os')
+    const own = Object.values(os.networkInterfaces())
+      .flat()
+      .find((entry) => entry.family === 'IPv4' && !entry.internal)
+    if (!own) return
+    const node = new HyperDHT({
+      bootstrap: [{ host: own.address, port: 1 }],
+      ephemeral: true
+    })
+    expect(node.bootstrapNodes).toEqual([{ host: own.address, port: 1 }])
+    await node.destroy()
+    expect(
+      () => new HyperDHT({ bootstrap: [{ host: '8.8.8.8', port: 1 }] })
+    ).toThrow(/not local/)
+  })
+
   test('a Hyperswarm without a bootstrap never builds its DHT', () => {
     expect(() => new Hyperswarm()).toThrow(NetworkGuardError)
     expect(() => new Hyperswarm({ bootstrap: HyperDHT.BOOTSTRAP })).toThrow(

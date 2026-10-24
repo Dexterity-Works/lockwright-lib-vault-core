@@ -10,6 +10,7 @@
 // hyperdht falls back to it for any falsy `bootstrap` (hyperdht/index.js:28,
 // `opts.bootstrap || BOOTSTRAP_NODES`); `[]` is an isolated node and passes.
 const net = require('net')
+const os = require('os')
 
 const { BOOTSTRAP_NODES } = require('hyperdht/lib/constants')
 
@@ -58,11 +59,26 @@ const isPrivateV4 = (host) => {
   )
 }
 
+// Addresses this host owns. A packet addressed to one of them never leaves
+// the machine, which hyperdht relies on when it probes its own interfaces.
+let ownAddresses = null
+const isOwnAddress = (host) => {
+  if (ownAddresses === null || !ownAddresses.has(host)) {
+    ownAddresses = new Set()
+    for (const list of Object.values(os.networkInterfaces())) {
+      for (const entry of list ?? [])
+        ownAddresses.add(entry.address.toLowerCase())
+    }
+  }
+  return ownAddresses.has(host)
+}
+
 const isLocalHost = (host) => {
   if (typeof host !== 'string') return false
   const lower = host.toLowerCase()
   if (lower === 'localhost' || lower === '::1') return true
   if (state.hosts.has(lower)) return true
+  if (isOwnAddress(lower)) return true
   if (!net.isIPv4(lower)) return false
   if (lower.startsWith('127.')) return true
   return state.allowPrivate && isPrivateV4(lower)
