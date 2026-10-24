@@ -1192,6 +1192,52 @@ describe('epochStore over real Autopass', () => {
     expect(seen?.invite.equals(issued.invite)).toBe(true)
   })
 
+  it('never puts a key in a status, a rotation result, an error or a log', async () => {
+    const [A, B, C] = await setup()
+    const outputs = []
+    outputs.push(await A.store.ensureEpoch({ start: true }))
+    await A.store.add('record/r', 'v')
+    await sync(A, B, C)
+    outputs.push(await kick(A, C))
+    await A.store.add('record/after', 'v')
+    await A.instance.add('record/bad', UNREADABLE)
+    await sync(A, B, C)
+
+    outputs.push(await C.store.get('record/after'))
+    outputs.push(await B.store.get('record/bad'))
+    const failed = await C.store.add('record/c', 'v').catch((error) => error)
+    expect(failed).toBeInstanceOf(EpochKeyUnavailableError)
+    outputs.push(failed.message, failed.epochId)
+    for (const peer of [A, B, C]) {
+      outputs.push(await peer.store.status(), peer.logger.warn.mock.calls)
+    }
+
+    const keys = new Set()
+    for (const peer of [A, C]) {
+      const me = peer.keyPair.publicKey.toString('hex')
+      for await (const row of A.instance.base.view.find('@autopass/records', {
+        gte: { key: 'epoch/' },
+        lt: { key: 'epoch0' }
+      })) {
+        for (const { topic, box } of Object.values(
+          JSON.parse(row.value).members
+        )) {
+          if (topic !== me) continue
+          for (const key of Object.values(openRing(box, peer.keyPair))) {
+            keys.add(key)
+          }
+        }
+      }
+    }
+    expect(keys.size).toBe(2)
+    expect(peers.some((p) => p.logger.warn.mock.calls.length > 0)).toBe(true)
+    const text = JSON.stringify(outputs)
+    for (const key of keys) {
+      expect(text).not.toContain(key)
+      expect(text).not.toContain(Buffer.from(key, 'base64').toString('hex'))
+    }
+  })
+
   it('names a roster row by its key, ignoring a row that claims another id', async () => {
     const [A, B] = await setup(['A', 'B'])
     const attacker = makeKeyPair()
