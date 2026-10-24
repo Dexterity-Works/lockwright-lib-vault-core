@@ -8,7 +8,8 @@
   "scripts": {
     "lint": "eslint .",
     "lint:fix": "eslint --fix .",
-    "test": "jest"
+    "test": "jest",
+    "test:network": "jest --config jest.network.config.js --runInBand --detectOpenHandles"
   },
   "dependencies": {
     "@noble/ciphers": "^2.2.0",
