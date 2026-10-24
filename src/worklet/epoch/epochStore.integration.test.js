@@ -1169,6 +1169,29 @@ describe('epochStore over real Autopass', () => {
     expect(await value(B, 'record/v2')).toBe('secret')
   })
 
+  // Honest gap, not a fix: Autopass appends the whole invite to the view
+  // (createInvite in autopass/index.js), the invite code is its z32 form,
+  // and a member adds whoever presents it. A kicked device still applies
+  // the view, so it can pair with an invite made after its kick and is
+  // sealed to again once its new row binds.
+  it('lets a kicked device read an invite made after its kick', async () => {
+    const [A, B, C] = await setup()
+    await A.store.ensureEpoch({ start: true })
+    await indexed(A, B, C)
+    await kick(A, C)
+    await indexed(A, B)
+    await sync(A, B, C)
+    expect(C.instance.base.writable).toBe(false)
+
+    await A.instance.createInvite()
+    await sync(A, B, C)
+
+    const issued = await A.instance.base.view.findOne('@autopass/invite', {})
+    const seen = await C.instance.base.view.findOne('@autopass/invite', {})
+    expect(issued).not.toBeNull()
+    expect(seen?.invite.equals(issued.invite)).toBe(true)
+  })
+
   it('names a roster row by its key, ignoring a row that claims another id', async () => {
     const [A, B] = await setup(['A', 'B'])
     const attacker = makeKeyPair()
