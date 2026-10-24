@@ -1122,6 +1122,37 @@ describe('epochStore over real Autopass', () => {
     expect((await rawEnvelope(B, 'record/b2')).$enc).toBe(1)
   })
 
+  it('retries persisting the epoch mode after a failed write', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    const local = B.instance.base.local
+    const setUserData = local.setUserData.bind(local)
+    const writes = []
+    local.setUserData = (key, ...rest) => {
+      const write =
+        key === 'lockwright/epoch-seen' && writes.length === 0
+          ? Promise.reject(new Error('disk full'))
+          : setUserData(key, ...rest)
+      if (key === 'lockwright/epoch-seen') writes.push(write)
+      return write
+    }
+
+    const first = await A.store.ensureEpoch({ start: true })
+    await sync(A, B)
+    expect(await B.store.status()).toMatchObject({ legacy: false })
+    await B.store.add('record/b', 'from B')
+    await sync(A, B)
+    await Promise.allSettled(writes)
+
+    await A.instance.remove(`epoch/${first.id}`)
+    await sync(A, B)
+    const restarted = createEpochStore({
+      instance: B.instance,
+      getPersonalKeyPair: async () => B.keyPair
+    })
+    await restarted.add('record/b2', 'from B again')
+    expect((await rawEnvelope(B, 'record/b2')).$enc).toBe(1)
+  })
+
   it('never writes under an older epoch once a middle epoch row is deleted', async () => {
     const [A, B] = await setup(['A', 'B'])
     const first = await A.store.ensureEpoch({ start: true })

@@ -88,6 +88,8 @@ export const createEpochStore = ({
   let legacy = true
   let epochSeen = false
   let epochSeenRead = false
+  // Written, or a write in flight; a failed write clears it for a retry.
+  let epochSeenStored = false
   // epochId -> key b64, only keys that open their record's check.
   let ring = Object.create(null)
   // epochId -> every key b64 an opened box offered for it.
@@ -278,21 +280,26 @@ export const createEpochStore = ({
       }
     }
 
-    if (records.length > 0 && !epochSeen) {
+    if (records.length > 0) {
       epochSeen = true
-      // Not awaited: this run already holds the flag in memory.
-      instance.base.local
-        .setUserData(EPOCH_SEEN, Buffer.from('1'))
-        .catch((error) => {
-          logger.warn('epochStore: could not persist the epoch mode', {
-            error: error?.name
-          })
-        })
     } else if (!epochSeen && !epochSeenRead) {
       // A read that fails fails the refresh: guessing plaintext would leak.
       const stored = await instance.base.local.getUserData(EPOCH_SEEN)
       epochSeen = stored?.toString() === '1'
+      epochSeenStored = epochSeen
       epochSeenRead = true
+    }
+    if (epochSeen && !epochSeenStored) {
+      epochSeenStored = true
+      // Not awaited: this run already holds the flag in memory.
+      instance.base.local
+        .setUserData(EPOCH_SEEN, Buffer.from('1'))
+        .catch((error) => {
+          epochSeenStored = false
+          logger.warn('epochStore: could not persist the epoch mode', {
+            error: error?.name
+          })
+        })
     }
 
     ring = nextRing
