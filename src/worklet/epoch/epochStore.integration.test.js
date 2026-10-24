@@ -2007,6 +2007,27 @@ describe('epochStore over real Autopass', () => {
     expect(await keys({})).toEqual(['record/1', 'record/3', 'record/5'])
   })
 
+  it('refreshes once to read a row whose key landed after the read began', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    await A.store.ensureEpoch({ start: true })
+    await sync(A, B)
+    await B.store.status()
+    await addDevice(A, await strayRow(A, 'E'))
+    const { id: next } = await A.store.ensureEpoch()
+    await A.store.add('record/late', 'secret')
+    expect((await rawEnvelope(A, 'record/late')).e).toBe(next)
+
+    // The row and the epoch that seals it arrive after B's read checked
+    // that its store was fresh.
+    const get = B.instance.get.bind(B.instance)
+    B.instance.get = async (key) => {
+      B.instance.get = get
+      await sync(A, B)
+      return get(key)
+    }
+    expect(await value(B, 'record/late')).toBe('secret')
+  })
+
   it('refreshes at most once per find while updates keep landing', async () => {
     const [A] = await setup(['A'])
     await A.store.ensureEpoch({ start: true })
