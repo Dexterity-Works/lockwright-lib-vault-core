@@ -221,16 +221,20 @@ const epochBy = (
   })
 }
 
-// X once held epoch 1 from author O, then O rotated to epoch 2 without X.
-// Every option flips one clause of the revoked rule.
+// X joined host H and once held epoch 1 from author O, then O rotated to
+// epoch 2 without X and H removed X's writer. Every option flips one clause
+// of the revoked rule.
 const revokedFor = async ({
   authorInRoster = true,
   heldKey = true,
-  wrote = true,
+  removed = true,
   inLatest = false,
   myRow = null
 } = {}) => {
-  const X = await makePeer('X')
+  const H = await makePeer('H')
+  const X = await makePeer('X', H)
+  await H.instance.addWriter(X.instance.writerKey)
+  await sync(H, X)
   const O = makeKeyPair()
   const e1 = '01'.repeat(16)
   const e2 = '02'.repeat(16)
@@ -267,11 +271,10 @@ const revokedFor = async ({
   for (const record of records) {
     await X.instance.add(`epoch/${record.id}`, JSON.stringify(record))
   }
-  if (!wrote) {
-    Object.defineProperty(X.instance.base.local, 'length', {
-      value: 0,
-      configurable: true
-    })
+  await sync(H, X)
+  if (removed) {
+    await H.instance.removeWriter(X.instance.writerKey)
+    await sync(H, X)
   }
   return (await X.store.status()).revoked
 }
@@ -1972,17 +1975,18 @@ describe('epochStore over real Autopass', () => {
     // No accepted epoch: its only author left the roster.
     expect(await revokedFor({ authorInRoster: false })).toBe(false)
     expect(await revokedFor({ heldKey: false })).toBe(false)
-    expect(await revokedFor({ wrote: false })).toBe(false)
+    // X wrote rows here, so its local core is not empty.
+    expect(await revokedFor({ removed: false })).toBe(false)
     expect(await revokedFor({ inLatest: true })).toBe(false)
     expect(
       await revokedFor({ myRow: (X) => strayRow(X, 'X', X.keyPair) })
     ).toBe(false)
-    // My row without a masterTopic still names me by its writer key.
+    // A row that names me only by my writer key goes with that writer.
     expect(
       await revokedFor({
         myRow: (X) => ({ id: 'X', writerKey: X.row.writerKey })
       })
-    ).toBe(false)
+    ).toBe(true)
   })
 
   it('fills a find limit with readable rows, forwards and in reverse', async () => {

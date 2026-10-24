@@ -795,22 +795,24 @@ export const createEpochStore = ({
     const canRead =
       legacy ||
       (latest ? !!ring[latest.id] : valid.every((record) => ring[record.id]))
+    const localKey = instance.base.local?.key
+    const me = localKey ? await instance.base.system?.get(localKey) : null
     return {
       vaultId,
       epoch: latest ? latest.id : null,
       seq: latest ? latest.seq : 0,
       legacy,
       canRead,
-      // Only a device that once held a key and wrote here was let go. A
-      // legacy row, a joiner whose row has not landed yet, or a kicked
-      // device pairing again on a fresh store is waiting, not revoked. A row
-      // left behind for a removed writer does not keep a kicked device from
-      // learning it was revoked.
+      // Only a device that once held a key and whose own writer was removed
+      // was let go (ADR 0014). A legacy row, a joiner whose row has not
+      // landed yet, or a kicked device pairing again on a fresh store is
+      // waiting, not revoked. A row left behind for a removed writer does
+      // not keep a kicked device from learning it was revoked.
       revoked:
         !!latest &&
         !canRead &&
         Object.keys(ring).length > 0 &&
-        instance.base.local?.length > 0 &&
+        me?.isRemoved === true &&
         !roster.some((row) => !row.removed && isMyRow(row, keyPair)),
       members: latest ? Object.keys(latest.members).sort() : [],
       uncovered: coverage().uncovered
