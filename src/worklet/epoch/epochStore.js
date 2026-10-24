@@ -25,6 +25,9 @@ import {
 const RECORDS = '@autopass/records'
 // Local core userData, so an owed start survives a restart.
 const START_OWED = 'lockwright/epoch-start-owed'
+// Local core userData: this device saw an epoch row, so the vault never
+// goes back to plaintext, even once every epoch row is gone.
+const EPOCH_SEEN = 'lockwright/epoch-seen'
 const noopLogger = { warn: () => {} }
 // The owed start could not be read, so nobody knows whether it is owed.
 const OWED_UNREAD = Symbol('owed start unread')
@@ -80,8 +83,11 @@ export const createEpochStore = ({
 }) => {
   let roster = []
   let epochs = { valid: [], accepted: [], latest: null }
-  // No row under `epoch/` at all, valid or not: plaintext mode.
+  // No row under `epoch/` at all, valid or not, and none ever seen here:
+  // plaintext mode.
   let legacy = true
+  let epochSeen = false
+  let epochSeenRead = false
   // epochId -> key b64, only keys that open their record's check.
   let ring = Object.create(null)
   // epochId -> every key b64 an opened box offered for it.
@@ -270,10 +276,27 @@ export const createEpochStore = ({
       }
     }
 
+    if (records.length > 0 && !epochSeen) {
+      epochSeen = true
+      // Not awaited: this run already holds the flag in memory.
+      instance.base.local
+        .setUserData(EPOCH_SEEN, Buffer.from('1'))
+        .catch((error) => {
+          logger.warn('epochStore: could not persist the epoch mode', {
+            error: error?.name
+          })
+        })
+    } else if (!epochSeen && !epochSeenRead) {
+      // A read that fails fails the refresh: guessing plaintext would leak.
+      const stored = await instance.base.local.getUserData(EPOCH_SEEN)
+      epochSeen = stored?.toString() === '1'
+      epochSeenRead = true
+    }
+
     ring = nextRing
     roster = nextRoster
     epochs = next
-    legacy = records.length === 0
+    legacy = !epochSeen
     refreshedAt = startedAt
   }
 

@@ -1054,6 +1054,29 @@ describe('epochStore over real Autopass', () => {
     expect(await value(A, 'record/b')).toBe('from B')
   })
 
+  it('never falls back to plaintext once every epoch row is deleted, across a restart', async () => {
+    const [A, B, C] = await setup()
+    const first = await A.store.ensureEpoch({ start: true })
+    await sync(A, B, C)
+    expect(await B.store.status()).toMatchObject({ legacy: false })
+
+    // Stands in for a kicked writer's delete that Autobase orders before
+    // its removal.
+    await C.instance.remove(`epoch/${first.id}`)
+    await sync(A, B, C)
+
+    await B.store.add('record/b', 'from B')
+    expect((await rawEnvelope(B, 'record/b')).$enc).toBe(1)
+
+    await B.instance.remove(`epoch/${(await B.store.status()).epoch}`)
+    const restarted = createEpochStore({
+      instance: B.instance,
+      getPersonalKeyPair: async () => B.keyPair
+    })
+    await restarted.add('record/b2', 'from B again')
+    expect((await rawEnvelope(B, 'record/b2')).$enc).toBe(1)
+  })
+
   it('names a roster row by its key, ignoring a row that claims another id', async () => {
     const [A, B] = await setup(['A', 'B'])
     const attacker = makeKeyPair()
