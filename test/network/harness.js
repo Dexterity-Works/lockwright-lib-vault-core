@@ -120,3 +120,25 @@ export const converge = (peers, key, { timeout, label = key } = {}) =>
     },
     { timeout, label: `converge ${label}` }
   )
+
+/**
+ * One vault created on `owner` and paired to every other peer, with every
+ * peer seeing every device row.
+ */
+export const shareVault = async (
+  net,
+  { owner = net.list[0].id, id = 'shared' } = {}
+) => {
+  const host = net.peers[owner]
+  await host.createVault({ id })
+  for (const peer of net.list) {
+    if (peer !== host) await peer.pair(await host.invite())
+  }
+  const n = net.list.length
+  for (const peer of net.list) {
+    await waitFor(async () => (await peer.devices()).length === n, {
+      label: `${peer.id} sees ${n} device rows`
+    })
+  }
+  return host
+}

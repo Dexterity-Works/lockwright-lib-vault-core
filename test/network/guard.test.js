@@ -88,12 +88,23 @@ describe('public-DHT guard', () => {
   test('an Autopass without a bootstrap is caught when it builds its swarm', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-autopass-'))
     const store = new Corestore(dir)
-    const pass = new Autopass(store)
+    // Opened without networking first: a rejected ready() makes
+    // ready-resource close the Autopass while autobase is still in its
+    // first advance, and autobase asserts on that race. _replicate() is the
+    // method ready() would have called (autopass/index.js:220, :317).
+    const pass = new Autopass(store, { replicate: false })
+    let pair = null
     try {
-      await expect(pass.ready()).rejects.toThrow(NetworkGuardError)
-      const pair = Autopass.pair(store, 'not-an-invite')
+      await pass.ready()
+      await pass.base.update()
+      await expect(pass._replicate()).rejects.toThrow(NetworkGuardError)
+      expect(pass.swarm).toBeNull()
+      await pass.close()
+      pair = Autopass.pair(store, 'not-an-invite')
       await expect(pair.ready()).rejects.toThrow(NetworkGuardError)
     } finally {
+      await pass.close()
+      await pair?.close()
       await store.close()
       fs.rmSync(dir, { recursive: true, force: true })
     }
