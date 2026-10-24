@@ -28,9 +28,15 @@ const memberPairs = (members) =>
     .sort(byCodePoint)
     .map((id) => [id, { topic: members[id].topic, box: members[id].box }])
 
-const canonicalBytes = ({ v, id, seq, prev, createdAt, by, members, check }) =>
+// `vault` is not stored: a record signed for one vault never verifies in
+// another, where its author may also be a member.
+const canonicalBytes = (
+  { v, id, seq, prev, createdAt, by, members, check },
+  vault
+) =>
   Buffer.from(
     JSON.stringify({
+      vault,
       v,
       id,
       seq,
@@ -60,9 +66,11 @@ export const generateEpochId = () => {
  *   check: { n: string, c: string }
  *   personalKeyPair: { publicKey: Buffer, secretKey: Buffer }
  *   createdAt?: number
- * }} opts
+ *   vault?: string | null
+ * }} opts `vault`: the vault's Autobase key, hex
  */
 export const buildEpochRecord = ({
+  vault = null,
   id = generateEpochId(),
   seq,
   prev,
@@ -87,7 +95,7 @@ export const buildEpochRecord = ({
   const sig = Buffer.alloc(sodium.crypto_sign_BYTES)
   sodium.crypto_sign_detached(
     sig,
-    canonicalBytes(record),
+    canonicalBytes(record, vault),
     personalKeyPair.secretKey
   )
   return { ...record, sig: sig.toString('hex') }
@@ -151,14 +159,15 @@ const isWellFormed = (record) =>
  * author may write epochs; see resolveEpochs.
  *
  * @param {unknown} record
+ * @param {string | null} [vault] the vault's Autobase key, hex
  * @returns {boolean}
  */
-export const verifySignature = (record) => {
+export const verifySignature = (record, vault = null) => {
   if (!isWellFormed(record)) return false
   try {
     return sodium.crypto_sign_verify_detached(
       Buffer.from(record.sig, 'hex'),
-      canonicalBytes(record),
+      canonicalBytes(record, vault),
       Buffer.from(record.by, 'hex')
     )
   } catch {
@@ -197,7 +206,7 @@ const compare = (a, b) =>
 export const resolveEpochs = (
   entries,
   roster,
-  { verify = verifySignature } = {}
+  { verify = (record) => verifySignature(record) } = {}
 ) => {
   const byId = new Map()
   for (const entry of entries) {

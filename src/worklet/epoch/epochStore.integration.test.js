@@ -192,8 +192,12 @@ const rawEnvelope = async (peer, key) =>
   JSON.parse((await peer.instance.get(key)).value)
 
 // An epoch record by `author`, sealing `ring` to each [deviceId, keyPair].
-// `ring[id]` is the epoch's own key.
-const epochBy = (author, { id, seq, prev = null, ring, to }) => {
+// `ring[id]` is the epoch's own key. Signed for the vault of the test's
+// first peer unless `vault` names another.
+const epochBy = (
+  author,
+  { id, seq, prev = null, ring, to, vault = peers[0].instance.base.key }
+) => {
   const rows = to.map(([deviceId, kp]) => ({
     id: deviceId,
     masterTopic: kp.publicKey.toString('hex')
@@ -206,6 +210,7 @@ const epochBy = (author, { id, seq, prev = null, ring, to }) => {
     ])
   )
   return buildEpochRecord({
+    vault: vault.toString('hex'),
     id,
     seq,
     prev,
@@ -233,6 +238,7 @@ const revokedFor = async ({
   if (myRow) await addDevice(X, await myRow(X))
   const records = [
     epochBy(O, {
+      vault: X.instance.base.key,
       id: e1,
       seq: 1,
       ring: { [e1]: k1 },
@@ -244,6 +250,7 @@ const revokedFor = async ({
         : [['O', O]]
     }),
     epochBy(O, {
+      vault: X.instance.base.key,
       id: e2,
       seq: 2,
       prev: e1,
@@ -421,6 +428,7 @@ describe('epochStore over real Autopass', () => {
 
     await A.instance.add('epoch/replayed-copy', firstRecord)
     const forged = buildEpochRecord({
+      vault: A.instance.base.key.toString('hex'),
       seq: 99,
       prev: second.id,
       members: {},
@@ -430,6 +438,7 @@ describe('epochStore over real Autopass', () => {
     await A.instance.add(`epoch/${forged.id}`, JSON.stringify(forged))
     const broken = {
       ...buildEpochRecord({
+        vault: A.instance.base.key.toString('hex'),
         seq: 3,
         prev: second.id,
         members: {},
@@ -1131,6 +1140,33 @@ describe('epochStore over real Autopass', () => {
     })
     await A.store.add('record/r', 'v')
     expect((await A.store.status()).seq).toBe(2)
+  })
+
+  it('ignores an epoch record its author signed for another vault', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    // V1: A's same personal key starts it alone, then X joins, so X's box
+    // carries V1's first key without X being a member of that epoch.
+    const A1 = await makePeer('A', null, A.keyPair)
+    await addDevice(A1, A1.row)
+    const v1First = await A1.store.ensureEpoch({ start: true })
+    expect(v1First).toMatchObject({ rotated: true, members: ['A'] })
+    const X = await makePeer('X', A1)
+    await A1.instance.addWriter(X.instance.writerKey)
+    await addDevice(A1, X.row)
+    await sync(A1, X)
+    await A1.store.ensureEpoch({ start: false })
+    await sync(A1, X)
+    expect(await X.store.status()).toMatchObject({ canRead: true })
+
+    // Stands in for a kicked V2 writer replaying the V1 record into V2.
+    const replayed = (await A1.instance.get(`epoch/${v1First.id}`)).value
+    await B.instance.add(`epoch/${v1First.id}`, replayed)
+    await sync(A, B)
+
+    await A.store.add('record/v2', 'secret')
+    expect((await rawEnvelope(A, 'record/v2')).e).not.toBe(v1First.id)
+    await sync(A, B)
+    expect(await value(B, 'record/v2')).toBe('secret')
   })
 
   it('names a roster row by its key, ignoring a row that claims another id', async () => {

@@ -1273,6 +1273,7 @@ describe('appDeps module functions (excluding encryption)', () => {
       )
       const boxes = sealRing({ ...ring, [id]: key }, rows)
       const record = buildEpochRecord({
+        vault: VAULT_KEY.toString('hex'),
         id,
         seq,
         prev,

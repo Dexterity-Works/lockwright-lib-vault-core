@@ -51,7 +51,9 @@ describe('epochRecord', () => {
     // UTF-16 order puts the astral id (surrogates D83D DE00) before U+FF5E.
     const astral = '\u{1F600}'
     const bmp = '\uFF5E'
+    const vault = '11'.repeat(32)
     const record = build({
+      vault,
       members: {
         9: { topic, box: 'x' },
         10: { topic, box: 'y' },
@@ -63,6 +65,7 @@ describe('epochRecord', () => {
     const { v, id, seq, prev, createdAt, by, check: c } = record
     // JSON.stringify of an object would put 9 before 10.
     const canonical = JSON.stringify({
+      vault,
       v,
       id,
       seq,
@@ -86,7 +89,7 @@ describe('epochRecord', () => {
         a.publicKey
       )
     ).toBe(true)
-    expect(verifySignature(record)).toBe(true)
+    expect(verifySignature(record, vault)).toBe(true)
   })
 
   it('fails when any canonical field changes', () => {
@@ -106,6 +109,16 @@ describe('epochRecord', () => {
     for (const edit of edits) {
       expect(verifySignature({ ...record, ...edit })).toBe(false)
     }
+  })
+
+  it('verifies a record only for the vault it was signed for', () => {
+    const v1 = '11'.repeat(32)
+    const v2 = '22'.repeat(32)
+    const record = build({ vault: v1 })
+
+    expect(verifySignature(record, v1)).toBe(true)
+    expect(verifySignature(record, v2)).toBe(false)
+    expect(verifySignature(record)).toBe(false)
   })
 
   it('fails when the author is not in the roster', () => {

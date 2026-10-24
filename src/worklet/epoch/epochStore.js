@@ -221,11 +221,13 @@ export const createEpochStore = ({
     })
   }
 
+  const vaultKeyHex = () => instance.base.key?.toString('hex') ?? null
+
   const verifyOnce = (record, { key, raw }) => {
     const cacheKey = `${key}:${record?.sig}`
     const hit = verified.get(cacheKey)
     if (hit?.raw === raw) return hit.ok
-    const ok = verifySignature(record)
+    const ok = verifySignature(record, vaultKeyHex())
     verified.set(cacheKey, { raw, ok })
     return ok
   }
@@ -587,6 +589,7 @@ export const createEpochStore = ({
       }
     }
     const record = buildEpochRecord({
+      vault: vaultKeyHex(),
       id,
       seq,
       prev: latest ? latest.id : null,
