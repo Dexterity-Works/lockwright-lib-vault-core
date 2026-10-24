@@ -1,0 +1,366 @@
+import Hypercore from 'hypercore'
+import sodium from 'sodium-native'
+
+import {
+  canSealTo,
+  DEVICE_ROW_CONSTANT,
+  EpochDecryptError,
+  EpochKeyUnavailableError,
+  decryptValue,
+  encryptValue,
+  generateEpochKey,
+  isEnvelope,
+  openRing,
+  opensCheck,
+  sealCheck,
+  sealRing,
+  signDeviceRow,
+  verifyDeviceRow
+} from './keyring.js'
+
+const keyPair = () => {
+  const publicKey = Buffer.alloc(sodium.crypto_sign_PUBLICKEYBYTES)
+  const secretKey = Buffer.alloc(sodium.crypto_sign_SECRETKEYBYTES)
+  sodium.crypto_sign_keypair(publicKey, secretKey)
+  return { publicKey, secretKey }
+}
+
+const member = (id, kp) => ({ id, masterTopic: kp.publicKey.toString('hex') })
+
+// Seals any JSON, not only a key map, the way sealRing would.
+const sealAs = (json, kp) => {
+  const message = Buffer.from(JSON.stringify(json))
+  const curvePk = Buffer.alloc(sodium.crypto_box_PUBLICKEYBYTES)
+  sodium.crypto_sign_ed25519_pk_to_curve25519(curvePk, kp.publicKey)
+  const box = Buffer.alloc(message.length + sodium.crypto_box_SEALBYTES)
+  sodium.crypto_box_seal(box, message, curvePk)
+  return box.toString('base64')
+}
+
+const editEnvelope = (envelope, edit) =>
+  JSON.stringify({ ...JSON.parse(envelope), ...edit })
+
+describe('keyring', () => {
+  const a = keyPair()
+  const b = keyPair()
+  const ring = { e1: generateEpochKey(), e2: generateEpochKey() }
+
+  it('seals a ring to each member and opens it with their key pair', () => {
+    const sealed = sealRing(ring, [member('A', a), member('B', b)])
+
+    expect(Object.keys(sealed).sort()).toEqual(['A', 'B'])
+    expect(openRing(sealed.A, a)).toEqual(ring)
+    expect(openRing(sealed.B, b)).toEqual(ring)
+  })
+
+  it('returns null when the ring is opened with the wrong key pair', () => {
+    const sealed = sealRing(ring, [member('A', a)])
+
+    expect(openRing(sealed.A, b)).toBeNull()
+    expect(openRing('not base64 at all', a)).toBeNull()
+  })
+
+  it('round trips a value and a file under an epoch key', () => {
+    const { envelope, file } = encryptValue(
+      'e2',
+      ring.e2,
+      '{"secret":1}',
+      Buffer.from('file bytes')
+    )
+
+    expect(isEnvelope(envelope)).toBe(true)
+    expect(envelope).not.toContain('secret')
+    expect(file.toString()).not.toContain('file bytes')
+
+    const out = decryptValue(envelope, ring, file)
+    expect(out.value).toBe('{"secret":1}')
+    expect(out.file.toString()).toBe('file bytes')
+  })
+
+  it('draws a fresh 24-byte nonce for every value, file and check it seals', () => {
+    const nonces = []
+    for (let i = 0; i < 500; i++) {
+      const { envelope } = encryptValue('e1', ring.e1, 'same', Buffer.from('f'))
+      const { n, fn } = JSON.parse(envelope)
+      nonces.push(n, fn, sealCheck(ring.e1).n)
+    }
+
+    for (const nonce of nonces) {
+      expect(Buffer.from(nonce, 'base64')).toHaveLength(
+        sodium.crypto_secretbox_NONCEBYTES
+      )
+    }
+    expect(new Set(nonces).size).toBe(nonces.length)
+  })
+
+  it('tells plaintext values from envelopes', () => {
+    expect(isEnvelope('{"title":"x"}')).toBe(false)
+    expect(isEnvelope('not json')).toBe(false)
+    expect(isEnvelope(null)).toBe(false)
+    expect(isEnvelope({ $enc: 1 })).toBe(true)
+  })
+
+  it('throws EpochKeyUnavailableError when the ring lacks the epoch', () => {
+    const { envelope } = encryptValue('e3', generateEpochKey(), 'v')
+
+    expect(() => decryptValue(envelope, ring)).toThrow(EpochKeyUnavailableError)
+  })
+
+  it('throws EpochDecryptError on a tampered e, c, or swapped nonce', () => {
+    const { envelope, file } = encryptValue(
+      'e1',
+      ring.e1,
+      'v',
+      Buffer.from('f')
+    )
+    const parsed = JSON.parse(envelope)
+    const other = JSON.parse(encryptValue('e1', ring.e1, 'v').envelope)
+    const flipped = Buffer.from(parsed.c, 'base64')
+    flipped[0] ^= 1
+
+    const tampered = [
+      editEnvelope(envelope, { e: 'e2' }),
+      editEnvelope(envelope, { c: flipped.toString('base64') }),
+      editEnvelope(envelope, { n: parsed.fn, fn: parsed.n }),
+      editEnvelope(envelope, { n: other.n })
+    ]
+
+    for (const bad of tampered) {
+      expect(() => decryptValue(bad, ring, file)).toThrow(EpochDecryptError)
+    }
+  })
+
+  it('skips members whose masterTopic is not a usable Ed25519 key', () => {
+    const lowOrder = '01' + '00'.repeat(31)
+    const zeros = '00'.repeat(32)
+    const sealed = sealRing(ring, [
+      { id: 'L', masterTopic: lowOrder },
+      member('A', a),
+      { id: 'Z', masterTopic: zeros }
+    ])
+
+    expect(Object.keys(sealed)).toEqual(['A'])
+    expect(openRing(sealed.A, a)).toEqual(ring)
+    expect(canSealTo(lowOrder)).toBe(false)
+    expect(canSealTo(zeros)).toBe(false)
+    expect(canSealTo(5)).toBe(false)
+    expect(canSealTo(a.publicKey.toString('hex'))).toBe(true)
+  })
+
+  it('refuses epoch keys that are not exactly 32 bytes of base64', () => {
+    const fake = '!'.repeat(43) + '='
+    const good = encryptValue('e1', ring.e1, 'v').envelope
+
+    expect(() => encryptValue('e1', fake, 'v')).toThrow(EpochDecryptError)
+    expect(() => decryptValue(good, { e1: fake })).toThrow(EpochDecryptError)
+    expect(() => encryptValue('e1', ring.e1.slice(0, -1), 'v')).toThrow(
+      EpochDecryptError
+    )
+  })
+
+  it('refuses a key whose unused base64 bits are set', () => {
+    // 43 characters carry 258 bits; the last 2 are padding. Setting them
+    // spells the same 32 bytes another way.
+    const chars =
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    const last = chars.indexOf(ring.e1[42])
+    const alias = `${ring.e1.slice(0, 42)}${chars[last ^ 1]}=`
+    expect(Buffer.from(alias, 'base64')).toEqual(Buffer.from(ring.e1, 'base64'))
+
+    expect(() => encryptValue('e1', alias, 'v')).toThrow(EpochDecryptError)
+    const sealed = sealRing({ e1: ring.e1, e9: alias }, [member('A', a)])
+    expect(openRing(sealed.A, a)).toEqual({ e1: ring.e1 })
+  })
+
+  it('drops ring entries that are not valid epoch keys when opening', () => {
+    const sealed = sealRing(
+      { e1: ring.e1, bad: '!'.repeat(43) + '=', short: 'AAAA' },
+      [member('A', a)]
+    )
+
+    expect(openRing(sealed.A, a)).toEqual({ e1: ring.e1 })
+  })
+
+  it('throws EpochDecryptError, never a TypeError, on malformed envelopes', () => {
+    const withFile = encryptValue('e1', ring.e1, 'v', Buffer.from('f'))
+    const plain = encryptValue('e1', ring.e1, 'v').envelope
+    const flippedFile = Buffer.from(withFile.file)
+    flippedFile[0] ^= 1
+    const cases = [
+      [editEnvelope(plain, { n: 123 }), ring, null],
+      [editEnvelope(withFile.envelope, { fn: {} }), ring, withFile.file],
+      [editEnvelope(plain, { e: 7 }), ring, null],
+      [editEnvelope(plain, { e: null }), ring, null],
+      [plain, null, null],
+      [editEnvelope(plain, { n: 'AAAA' }), ring, null],
+      [
+        editEnvelope(plain, { c: Buffer.alloc(10).toString('base64') }),
+        ring,
+        null
+      ],
+      [
+        editEnvelope(plain, { fn: JSON.parse(withFile.envelope).fn }),
+        ring,
+        null
+      ],
+      [plain, ring, withFile.file],
+      [withFile.envelope, ring, flippedFile]
+    ]
+
+    for (const [envelope, keys, file] of cases) {
+      expect(() => decryptValue(envelope, keys, file)).toThrow(
+        EpochDecryptError
+      )
+    }
+  })
+
+  it('throws EpochDecryptError on bad base64, non-string c, or the wrong key', () => {
+    const plain = encryptValue('e1', ring.e1, 'v').envelope
+    const cases = [
+      [editEnvelope(plain, { c: 5 }), ring],
+      [editEnvelope(plain, { c: ['AAAA'] }), ring],
+      [editEnvelope(plain, { c: '!!!!' }), ring],
+      [editEnvelope(plain, { n: '!!!!' }), ring],
+      // A valid key, but not the one this epoch was sealed with.
+      [plain, { e1: ring.e2 }],
+      ['[]', ring],
+      ['{"$enc":"1"}', ring]
+    ]
+
+    for (const [envelope, keys] of cases) {
+      expect(() => decryptValue(envelope, keys)).toThrow(EpochDecryptError)
+    }
+    expect(() => decryptValue(plain, { e1: 42 })).toThrow(
+      EpochKeyUnavailableError
+    )
+  })
+
+  it('opens a check only with the key it was sealed under', () => {
+    const check = sealCheck(ring.e1)
+
+    expect(opensCheck(check, ring.e1)).toBe(true)
+    expect(opensCheck(check, ring.e2)).toBe(false)
+    expect(opensCheck({ ...check, n: sealCheck(ring.e1).n }, ring.e1)).toBe(
+      false
+    )
+    expect(opensCheck(check, 'AAAA')).toBe(false)
+    expect(opensCheck(null, ring.e1)).toBe(false)
+    // A box sealed under the key but holding anything else is no check.
+    const other = JSON.parse(encryptValue('e1', ring.e1, 'not it').envelope)
+    expect(opensCheck({ n: other.n, c: other.c }, ring.e1)).toBe(false)
+  })
+
+  it('opens no ring from a box that is not a sealed key map', () => {
+    expect(openRing(sealAs([ring.e1], a), a)).toBeNull()
+    expect(openRing(sealAs('just a string', a), a)).toBeNull()
+    expect(openRing(sealAs(null, a), a)).toBeNull()
+    expect(openRing(123, a)).toBeNull()
+    expect(openRing(Buffer.alloc(8).toString('base64'), a)).toBeNull()
+  })
+})
+
+describe('device row signature', () => {
+  const writer = keyPair()
+  const vaultKeyHex = 'ab'.repeat(32)
+  const writerKey = Hypercore.key(writer.publicKey).toString('hex')
+
+  // Signs the message as verifyDeviceRow rebuilds it, whatever the fields.
+  const signedRow = (fields, signer = writer) => {
+    const row = {
+      id: 'A',
+      masterTopic: keyPair().publicKey.toString('hex'),
+      writerKey,
+      writerPublicKey: writer.publicKey.toString('hex'),
+      ...fields
+    }
+    const message = Buffer.from(
+      DEVICE_ROW_CONSTANT +
+        JSON.stringify([vaultKeyHex, row.id, row.masterTopic, row.writerKey])
+    )
+    const sig = Buffer.alloc(sodium.crypto_sign_BYTES)
+    sodium.crypto_sign_detached(sig, message, signer.secretKey)
+    return { ...row, sig: sig.toString('hex') }
+  }
+
+  it('binds no row whose masterTopic is uppercase hex', () => {
+    const row = signedRow({})
+    expect(verifyDeviceRow(row, vaultKeyHex)).toBe(true)
+
+    const upper = signedRow({ masterTopic: row.masterTopic.toUpperCase() })
+    expect(verifyDeviceRow(upper, vaultKeyHex)).toBe(false)
+    expect(
+      signDeviceRow({ secretKey: writer.secretKey, vaultKeyHex, ...upper })
+    ).toBeNull()
+  })
+
+  const row = signedRow({})
+  const other = keyPair()
+  const otherVault = 'cd'.repeat(32)
+
+  it('verifies a row signDeviceRow signed', () => {
+    const sig = signDeviceRow({
+      secretKey: writer.secretKey,
+      vaultKeyHex,
+      ...row
+    })
+    expect(sig).toBe(row.sig)
+    expect(verifyDeviceRow({ ...row, sig }, vaultKeyHex)).toBe(true)
+  })
+
+  it.each([
+    ['replayed under another id', { ...row, id: 'B' }, vaultKeyHex],
+    ['replayed in another vault', row, otherVault],
+    ['an uppercase sig', { ...row, sig: row.sig.toUpperCase() }, vaultKeyHex],
+    ['a short sig', { ...row, sig: row.sig.slice(2) }, vaultKeyHex],
+    ['a sig that is not a string', { ...row, sig: 7 }, vaultKeyHex],
+    [
+      'an uppercase writerPublicKey',
+      { ...row, writerPublicKey: row.writerPublicKey.toUpperCase() },
+      vaultKeyHex
+    ],
+    [
+      'a short writerPublicKey',
+      { ...row, writerPublicKey: row.writerPublicKey.slice(2) },
+      vaultKeyHex
+    ],
+    [
+      'a row signed by a key that does not hash to writerKey',
+      signedRow({ writerPublicKey: other.publicKey.toString('hex') }, other),
+      vaultKeyHex
+    ],
+    ['no row', null, vaultKeyHex],
+    ['a string row', JSON.stringify(row), vaultKeyHex],
+    ['a number row', 42, vaultKeyHex],
+    ['an array row', [row], vaultKeyHex],
+    ['no vault key', row, undefined],
+    ['an uppercase vault key', row, vaultKeyHex.toUpperCase()],
+    ['a short vault key', row, vaultKeyHex.slice(2)],
+    ['a Buffer vault key', row, Buffer.from(vaultKeyHex, 'hex')]
+  ])('does not verify %s', (_, candidate, vaultKey) => {
+    expect(verifyDeviceRow(candidate, vaultKey)).toBe(false)
+  })
+
+  it.each([
+    [
+      'a hex string secret key',
+      { secretKey: writer.secretKey.toString('hex') }
+    ],
+    ['a 32-byte secret key', { secretKey: writer.secretKey.subarray(0, 32) }],
+    ['no secret key', { secretKey: undefined }],
+    ['no vault key', { vaultKeyHex: undefined }],
+    ['an uppercase vault key', { vaultKeyHex: vaultKeyHex.toUpperCase() }],
+    ['a Buffer vault key', { vaultKeyHex: Buffer.from(vaultKeyHex, 'hex') }],
+    ['an id that is not a string', { id: 1 }],
+    ['no masterTopic', { masterTopic: undefined }],
+    ['an uppercase writerKey', { writerKey: writerKey.toUpperCase() }]
+  ])('signs nothing for %s', (_, fields) => {
+    expect(
+      signDeviceRow({
+        secretKey: writer.secretKey,
+        vaultKeyHex,
+        ...row,
+        ...fields
+      })
+    ).toBeNull()
+  })
+})

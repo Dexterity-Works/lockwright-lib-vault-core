@@ -14,6 +14,13 @@ jest.mock('sodium-native', () => ({
 }))
 
 describe('encryptVaultWithKey', () => {
+  // Buffer is shared by every test file a worker runs.
+  const { alloc, from, byteLength } = Buffer
+
+  afterEach(() => {
+    Object.assign(Buffer, { alloc, from, byteLength })
+  })
+
   beforeEach(() => {
     jest.clearAllMocks()
 

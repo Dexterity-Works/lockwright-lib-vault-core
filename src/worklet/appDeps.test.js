@@ -73,68 +73,77 @@ jest.mock('autopass', () => {
   const mockAutopassUpdate = jest.fn().mockResolvedValue()
   globalThis.__mockAutopassUpdate = mockAutopassUpdate
 
-  const mockAutopass = jest.fn().mockImplementation(() => ({
-    ready: jest.fn().mockResolvedValue(),
-    close: jest.fn().mockResolvedValue(),
-    suspend: jest.fn().mockResolvedValue(),
-    resume: jest.fn().mockResolvedValue(),
-    add: jest.fn().mockResolvedValue(),
-    remove: jest.fn().mockResolvedValue(),
-    removeWriter: jest.fn().mockResolvedValue(),
-    get: jest.fn().mockResolvedValue({
-      value: JSON.stringify({ id: 'vault-id' }),
-      file: Buffer.from('test file content')
-    }),
-    createInvite: jest.fn().mockResolvedValue('invite-code'),
-    deleteInvite: jest.fn().mockResolvedValue(),
-    encryptionKey: {
-      toString: jest.fn().mockReturnValue('encryption-key')
-    },
-    list: jest.fn().mockResolvedValue({
-      on: (event, callback) => {
-        if (event === 'data') {
-          callback({ key: 'test1', value: 1 })
-          callback({ key: 'filter_test', value: 2 })
-          callback({ key: 'test2', value: 3 })
+  // A real EventEmitter, so 'update' reaches every listener the code adds.
+  const { EventEmitter } = jest.requireActual('events')
+  const mockAutopass = jest.fn().mockImplementation(() =>
+    Object.assign(new EventEmitter(), {
+      ready: jest.fn().mockResolvedValue(),
+      close: jest.fn().mockResolvedValue(),
+      suspend: jest.fn().mockResolvedValue(),
+      resume: jest.fn().mockResolvedValue(),
+      add: jest.fn().mockResolvedValue(),
+      remove: jest.fn().mockResolvedValue(),
+      removeWriter: jest.fn().mockResolvedValue(),
+      get: jest.fn().mockResolvedValue({
+        value: JSON.stringify({ id: 'vault-id' }),
+        file: Buffer.from('test file content')
+      }),
+      createInvite: jest.fn().mockResolvedValue('invite-code'),
+      deleteInvite: jest.fn().mockResolvedValue(),
+      encryptionKey: {
+        toString: jest.fn().mockReturnValue('encryption-key')
+      },
+      list: jest.fn().mockResolvedValue({
+        on: (event, callback) => {
+          if (event === 'data') {
+            callback({ key: 'test1', value: 1 })
+            callback({ key: 'filter_test', value: 2 })
+            callback({ key: 'test2', value: 3 })
+          }
+          if (event === 'end') {
+            callback()
+          }
         }
-        if (event === 'end') {
-          callback()
+      }),
+      pairInstance: jest.fn().mockResolvedValue(),
+      core: {
+        ready: jest.fn().mockResolvedValue()
+      },
+      base: {
+        update: (...args) => globalThis.__mockAutopassUpdate(...args),
+        view: {
+          flush: jest.fn().mockResolvedValue(),
+          find: jest.fn().mockReturnValue({
+            async *[Symbol.asyncIterator]() {}
+          })
+        },
+        local: {
+          keyPair: mockMakeKeyPairFromSeed(Buffer.alloc(32, 0x11)),
+          userData: new Map(),
+          async getUserData(key) {
+            return this.userData.get(key) ?? null
+          },
+          async setUserData(key, value) {
+            this.userData.set(key, value)
+          }
         }
-      }
-    }),
-    removeAllListeners: jest.fn(),
-    on: jest.fn(),
-    pairInstance: jest.fn().mockResolvedValue(),
-    core: {
-      ready: jest.fn().mockResolvedValue()
-    },
-    base: {
-      update: (...args) => globalThis.__mockAutopassUpdate(...args),
-      view: {
-        flush: jest.fn().mockResolvedValue(),
-        find: jest.fn().mockReturnValue({
-          async *[Symbol.asyncIterator]() {}
+      },
+      store: {
+        createKeyPair: jest.fn(async (name) => {
+          const seed = Buffer.alloc(32)
+          Buffer.from(`mock-store:${name}`).copy(seed)
+          return mockMakeKeyPairFromSeed(seed)
         })
       },
-      local: {
-        keyPair: mockMakeKeyPairFromSeed(Buffer.alloc(32, 0x11))
-      }
-    },
-    store: {
-      createKeyPair: jest.fn(async (name) => {
-        const seed = Buffer.alloc(32)
-        Buffer.from(`mock-store:${name}`).copy(seed)
-        return mockMakeKeyPairFromSeed(seed)
-      })
-    },
-    writerKey: Buffer.from(
-      'aabbccddeeff0011223344556677889900aabbccddeeff00112233445566778899',
-      'hex'
-    ),
-    getMirror: jest.fn().mockResolvedValue([]),
-    addMirror: jest.fn().mockResolvedValue(),
-    removeMirror: jest.fn().mockResolvedValue()
-  }))
+      writerKey: Buffer.from(
+        'aabbccddeeff0011223344556677889900aabbccddeeff00112233445566778899',
+        'hex'
+      ),
+      getMirror: jest.fn().mockResolvedValue([]),
+      addMirror: jest.fn().mockResolvedValue(),
+      removeMirror: jest.fn().mockResolvedValue()
+    })
+  )
 
   mockAutopass.pair = jest.fn().mockReturnValue(mockPair)
 
@@ -257,11 +266,102 @@ global.Bare = {
   platform: 'posix' // Unix-like for tests
 }
 
+import Autopass from 'autopass'
 import bareFs from 'bare-fs'
+import Hypercore from 'hypercore'
 
 import * as appDeps from './appDeps'
+import { buildEpochRecord, generateEpochId } from './epoch/epochRecord'
+import { isPlaintextKey } from './epoch/epochStore'
+import {
+  encryptValue,
+  EpochRotationPendingError,
+  generateEpochKey,
+  sealCheck,
+  sealRing,
+  signDeviceRow,
+  verifyDeviceRow,
+  writeErrorMessage
+} from './epoch/keyring'
+import { convertV1RecordToV2 } from './utils/recordNamespaces'
 
 const mockSodium = require('sodium-native')
+
+const VAULT_KEY = Buffer.alloc(32, 0x22)
+
+// In-memory records behind the mocked active vault: add/get/remove and a
+// HyperDB-style range find, so the real epoch store runs over it.
+const useMemoryVault = (instance, rows = new Map()) => {
+  const inRange = (key, { gte, gt, lte, lt } = {}) =>
+    (!gte || key >= gte.key) &&
+    (!gt || key > gt.key) &&
+    (!lte || key <= lte.key) &&
+    (!lt || key < lt.key)
+  instance.add = jest.fn(async (key, value, file) => {
+    rows.set(key, { key, value, file: file ?? null })
+  })
+  instance.get = jest.fn(async (key) => {
+    const row = rows.get(key)
+    return row ? { value: row.value, file: row.file } : null
+  })
+  instance.remove = jest.fn(async (key) => {
+    rows.delete(key)
+  })
+  instance.base.view.find = jest.fn((_, range) => ({
+    async *[Symbol.asyncIterator]() {
+      for (const key of [...rows.keys()].sort()) {
+        if (inRange(key, range)) yield rows.get(key)
+      }
+    }
+  }))
+  instance.base.writable = true
+  instance.base.key = VAULT_KEY
+  // The local writer key is the hash of its core's manifest.
+  instance.writerKey = Hypercore.key(instance.base.local.keyPair.publicKey)
+  // Every writer a row names is a current writer.
+  instance.base.system = {
+    get: async () => ({ isIndexer: true, isRemoved: false, length: 1 })
+  }
+  const put = (key, value) => rows.set(key, { key, value, file: null })
+  return { rows, put }
+}
+
+const makeSignKeyPair = () => {
+  const publicKey = Buffer.alloc(mockSodium.crypto_sign_PUBLICKEYBYTES)
+  const secretKey = Buffer.alloc(mockSodium.crypto_sign_SECRETKEYBYTES)
+  mockSodium.crypto_sign_keypair(publicKey, secretKey)
+  return { publicKey, secretKey }
+}
+
+// A row its writer signed. The device key stands in as the writer key
+// pair unless `writer` names one, so each device has its own writer.
+const deviceRow = (id, keyPair, writer = keyPair) => {
+  const row = {
+    id,
+    writerKey: Hypercore.key(writer.publicKey).toString('hex'),
+    masterTopic: keyPair.publicKey.toString('hex')
+  }
+  return JSON.stringify({
+    ...row,
+    writerPublicKey: writer.publicKey.toString('hex'),
+    sig: signDeviceRow({
+      secretKey: writer.secretKey,
+      vaultKeyHex: VAULT_KEY.toString('hex'),
+      ...row
+    })
+  })
+}
+
+// My row, written by the active vault's local writer.
+const myRow = (me) =>
+  deviceRow('me', me, appDeps.getActiveVaultInstance().base.local.keyPair)
+
+const waitFor = async (check) => {
+  for (let i = 0; i < 200 && !check(); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  expect(check()).toBe(true)
+}
 
 describe('appDeps module functions (excluding encryption)', () => {
   beforeEach(async () => {
@@ -590,6 +690,10 @@ describe('appDeps module functions (excluding encryption)', () => {
         id: 'vault1',
         encryptionKey: 'key'
       })
+      const { put } = useMemoryVault(appDeps.getActiveVaultInstance())
+      put('test1', '1')
+      put('filter_test', '2')
+      put('test2', '3')
       const result = await appDeps.activeVaultList('test')
       expect(result).toEqual([1, 3])
     })
@@ -690,7 +794,7 @@ describe('appDeps module functions (excluding encryption)', () => {
           lte: undefined,
           gt: undefined,
           lt: { key: 'actions/queue/AAA0' },
-          limit: 50,
+          // The epoch store applies the limit to readable rows itself.
           reverse: false
         }
       )
@@ -865,15 +969,48 @@ describe('appDeps module functions (excluding encryption)', () => {
       })
 
       const active = appDeps.getActiveVaultInstance()
-      const removeAllListenersSpy = jest.spyOn(active, 'removeAllListeners')
+      const removeListenerSpy = jest.spyOn(active, 'removeListener')
 
       const onUpdate = jest.fn()
       await appDeps.initListener({ vaultId: 'vault1', onUpdate })
+      const listeners = active.listenerCount('update')
 
-      removeAllListenersSpy.mockClear()
+      removeListenerSpy.mockClear()
 
       await appDeps.initListener({ vaultId: 'vault1', onUpdate })
-      expect(removeAllListenersSpy).not.toHaveBeenCalled()
+      expect(removeListenerSpy).not.toHaveBeenCalled()
+      expect(active.listenerCount('update')).toBe(listeners)
+
+      active.emit('update')
+      await waitFor(() => onUpdate.mock.calls.length > 0)
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      expect(onUpdate).toHaveBeenCalledTimes(1)
+    })
+
+    test('initListener swaps its update listener when the vaultId changes', async () => {
+      await appDeps.setStoragePath('/home/testuser/vaultdata')
+      await appDeps.masterVaultInit({
+        encryptionKey: 'key',
+        hashedPassword: 'pw'
+      })
+      await appDeps.initActiveVaultInstance({
+        id: 'vault1',
+        encryptionKey: 'key'
+      })
+
+      const active = appDeps.getActiveVaultInstance()
+      const onUpdate = jest.fn()
+      await appDeps.initListener({ vaultId: 'vault1', onUpdate })
+      const listeners = active.listenerCount('update')
+      await appDeps.initListener({ vaultId: 'vault2', onUpdate })
+      // The reconcile debounce folds a second handler's call into one, so
+      // the count is what shows a handler left behind.
+      expect(active.listenerCount('update')).toBe(listeners)
+
+      active.emit('update')
+      await waitFor(() => onUpdate.mock.calls.length > 0)
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      expect(onUpdate).toHaveBeenCalledTimes(1)
     })
   })
 
@@ -998,6 +1135,1315 @@ describe('appDeps module functions (excluding encryption)', () => {
       expect(enriched.otpPublic.type).toBe('TOTP')
       expect(enriched.otpPublic).not.toHaveProperty('currentCode')
       expect(enriched.otpPublic).not.toHaveProperty('timeRemaining')
+    })
+  })
+  describe('Active vault epoch store', () => {
+    let me
+    let vault
+
+    beforeEach(async () => {
+      await appDeps.setStoragePath('/home/testuser/vaultdata')
+      await appDeps.masterVaultInit({
+        encryptionKey: 'key',
+        hashedPassword: 'pw'
+      })
+      await appDeps.initActiveVaultInstance({
+        id: 'vault1',
+        encryptionKey: 'key'
+      })
+      me = await appDeps.getPersonalKeyPair()
+      vault = useMemoryVault(appDeps.getActiveVaultInstance())
+      vault.put('device/me', myRow(me))
+    })
+
+    afterEach(async () => {
+      appDeps.setEpochStatusListener(null)
+      await appDeps.closeAllInstances()
+    })
+
+    // Attach the app's update listener; the returned function emits one
+    // update and waits until its reconcile and epoch sync ran.
+    const listen = async () => {
+      const instance = appDeps.getActiveVaultInstance()
+      const onUpdate = jest.fn()
+      await appDeps.initListener({ vaultId: 'vault1', onUpdate })
+      return async () => {
+        const before = onUpdate.mock.calls.length
+        instance.emit('update')
+        await waitFor(() => onUpdate.mock.calls.length > before)
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+    }
+
+    // Close the active vault and open it again over the same rows, so its
+    // migration runs over them. `wrap` gets the new instance before it opens.
+    const reopen = async ({ writable = true, wrap } = {}) => {
+      const { rows } = vault
+      await appDeps.closeActiveVaultInstance()
+      const make = Autopass.getMockImplementation()
+      Autopass.mockImplementationOnce((...args) => {
+        const instance = make(...args)
+        vault = useMemoryVault(instance, rows)
+        instance.base.writable = writable
+        wrap?.(instance)
+        return instance
+      })
+      await appDeps.initActiveVaultInstance({
+        id: 'vault1',
+        encryptionKey: 'key'
+      })
+    }
+
+    // Hold the next full listing of the active vault until the returned
+    // release runs. `when` picks which listing.
+    const holdListing = (when = () => true) => {
+      const { view } = appDeps.getActiveVaultInstance().base
+      const find = view.find
+      let release
+      const gate = new Promise((resolve) => {
+        release = resolve
+      })
+      const held = { listed: false, release: () => release() }
+      view.find = jest.fn((name, range) => {
+        const rows = find(name, range)
+        if (held.listed || range?.gte || range?.lt || !when()) return rows
+        held.listed = true
+        return {
+          async *[Symbol.asyncIterator]() {
+            await gate
+            yield* rows
+          }
+        }
+      })
+      return held
+    }
+
+    // Close the active vault and open vault2, migrated already, so opening
+    // it writes nothing. Returns vault2's add, cleared.
+    const openMigratedVault2 = async () => {
+      await appDeps.closeActiveVaultInstance()
+      const make = Autopass.getMockImplementation()
+      let add
+      Autopass.mockImplementationOnce((...args) => {
+        const next = make(...args)
+        const vault2 = useMemoryVault(next)
+        vault2.put('device/me', deviceRow('me', me, next.base.local.keyPair))
+        vault2.put('vault-ext', JSON.stringify({ migratedToSchema: 2 }))
+        add = next.add
+        return next
+      })
+      await appDeps.initActiveVaultInstance({
+        id: 'vault2',
+        encryptionKey: 'key'
+      })
+      add.mockClear()
+      return add
+    }
+
+    const unreadable = JSON.stringify({
+      $enc: 1,
+      e: 'ff'.repeat(16),
+      n: 'AA==',
+      c: 'AA=='
+    })
+
+    // The keys of the epochs putForeignEpoch wrote, by epoch id.
+    const foreignKeys = new Map()
+
+    // A rostered device `other` writes epoch `seq` after `prev`, sealed to
+    // itself only, or to me as well. `carry` names earlier foreign epochs
+    // whose keys its ring holds too.
+    const putForeignEpoch = (
+      seq = 1,
+      prev = null,
+      { withMe = false, carry = [] } = {}
+    ) => {
+      const other = makeSignKeyPair()
+      const rows = [
+        { id: 'other', masterTopic: other.publicKey.toString('hex') }
+      ]
+      if (withMe)
+        rows.push({ id: 'me', masterTopic: me.publicKey.toString('hex') })
+      vault.put('device/other', deviceRow('other', other))
+      const id = generateEpochId()
+      const key = generateEpochKey()
+      foreignKeys.set(id, key)
+      const ring = Object.fromEntries(
+        carry.map((earlier) => [earlier, foreignKeys.get(earlier)])
+      )
+      const boxes = sealRing({ ...ring, [id]: key }, rows)
+      const record = buildEpochRecord({
+        vault: VAULT_KEY.toString('hex'),
+        id,
+        seq,
+        prev,
+        members: Object.fromEntries(
+          rows.map((row) => [
+            row.id,
+            { topic: row.masterTopic, box: boxes[row.id] }
+          ])
+        ),
+        check: sealCheck(key),
+        personalKeyPair: other
+      })
+      vault.put(`epoch/${id}`, JSON.stringify(record))
+      return id
+    }
+
+    test('activeVaultAdd writes plaintext before an epoch and an envelope after', async () => {
+      await appDeps.activeVaultAdd('note/1', { title: 'before' })
+      expect(JSON.parse(vault.rows.get('note/1').value)).toEqual({
+        title: 'before'
+      })
+
+      const result = await appDeps.activeVaultEnsureEpoch({ start: true })
+      expect(result).toMatchObject({ rotated: true, members: ['me'] })
+
+      await appDeps.activeVaultAdd('note/2', { title: 'after' })
+      const stored = vault.rows.get('note/2').value
+      expect(JSON.parse(stored)).toMatchObject({ $enc: 1, e: result.id })
+      expect(stored).not.toContain('after')
+    })
+
+    test('activeVaultAdd signs a device row that names this writer', async () => {
+      const writerKey = appDeps.activeVaultGetWriterKey()
+      const row = {
+        id: 'me',
+        name: 'phone',
+        writerKey,
+        masterTopic: me.publicKey.toString('hex')
+      }
+      await appDeps.activeVaultAdd('device/me', row)
+      const stored = JSON.parse(vault.rows.get('device/me').value)
+      expect(stored).toMatchObject(row)
+      expect(verifyDeviceRow(stored, VAULT_KEY.toString('hex'))).toBe(true)
+
+      // Another writer's row is stored as given.
+      const other = { ...row, id: 'other', writerKey: 'ab'.repeat(32) }
+      await appDeps.activeVaultAdd('device/other', other)
+      expect(JSON.parse(vault.rows.get('device/other').value)).toEqual(other)
+    })
+
+    test('get, getFile, list and find decrypt and omit unreadable records', async () => {
+      await appDeps.activeVaultAdd('note/1', { title: 'legacy' })
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      await appDeps.activeVaultAdd('note/2', { title: 'sealed' })
+      await appDeps.activeVaultAdd('file/1', {}, Buffer.from('attachment'))
+      vault.put(
+        'note/3',
+        JSON.stringify({ $enc: 1, e: 'ff'.repeat(16), n: 'AA==', c: 'AA==' })
+      )
+
+      expect(vault.rows.get('file/1').file.toString()).not.toBe('attachment')
+      expect(await appDeps.activeVaultGetFile('file/1')).toEqual(
+        Buffer.from('attachment')
+      )
+      expect(await appDeps.activeVaultGet('note/2')).toEqual({
+        title: 'sealed'
+      })
+      expect(await appDeps.activeVaultGet('note/3')).toBeNull()
+      expect(await appDeps.activeVaultList('note/')).toEqual([
+        { title: 'legacy' },
+        { title: 'sealed' }
+      ])
+      expect(
+        await appDeps.activeVaultFind({
+          gte: { key: 'note/' },
+          lt: { key: 'note0' }
+        })
+      ).toEqual([
+        { key: 'note/1', value: { title: 'legacy' } },
+        { key: 'note/2', value: { title: 'sealed' } }
+      ])
+    })
+
+    test('activeVaultAdd reports a missing epoch key in words the UI can show', async () => {
+      const id = putForeignEpoch()
+
+      await expect(
+        appDeps.activeVaultAdd('note/1', { title: 'x' })
+      ).rejects.toThrow('Vault key not available yet')
+      expect(vault.rows.has('note/1')).toBe(false)
+      expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+        epoch: id,
+        canRead: false,
+        revoked: false
+      })
+    })
+
+    test('activeVaultAdd leaves a v2 twin it cannot read alone', async () => {
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      vault.put('record-v2/r1', unreadable)
+
+      await appDeps.activeVaultAdd('record/r1', {
+        id: 'r1',
+        type: 'note',
+        data: { title: 'edited' }
+      })
+      const [v1] = await appDeps.activeVaultFind({
+        gte: { key: 'record/r1' },
+        lte: { key: 'record/r1' }
+      })
+      expect(v1.value).toMatchObject({ data: { title: 'edited' } })
+      expect(vault.rows.get('record-v2/r1').value).toBe(unreadable)
+    })
+
+    describe('a record whose v2 row this device cannot read', () => {
+      beforeEach(async () => {
+        await appDeps.activeVaultEnsureEpoch({ start: true })
+        await appDeps.activeVaultAdd('record/r1', {
+          id: 'r1',
+          type: 'note',
+          data: { title: 'stale' }
+        })
+        await appDeps.addOtpToRecord(
+          'r1',
+          'otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP&counter=0'
+        )
+        vault.put('record-v2/r1', unreadable)
+      })
+
+      test.each([
+        ['generateHotpNext', () => appDeps.generateHotpNext('r1')],
+        [
+          'addOtpToRecord',
+          () => appDeps.addOtpToRecord('r1', 'JBSWY3DPEHPK3PXP')
+        ],
+        ['removeOtpFromRecord', () => appDeps.removeOtpFromRecord('r1')]
+      ])('%s leaves it alone', async (_, write) => {
+        await expect(write()).rejects.toThrow('Record not found')
+        expect(vault.rows.get('record-v2/r1').value).toBe(unreadable)
+      })
+
+      test('get and the merged list hide it instead of showing its v1 copy', async () => {
+        await appDeps.activeVaultAdd('record/r2', {
+          id: 'r2',
+          type: 'note',
+          data: { title: 'readable' }
+        })
+
+        expect(await appDeps.activeVaultGet('record/r1')).toBeNull()
+        expect(await appDeps.activeVaultGet('record-v2/r1')).toBeNull()
+        for (const filterKey of ['record/', 'record-v2/']) {
+          const list = await appDeps.activeVaultList(filterKey)
+          expect(list.map((record) => record.id)).toEqual(['r2'])
+        }
+      })
+
+      test('the merged list keeps a record whose v1 row alone is unreadable', async () => {
+        await appDeps.activeVaultAdd('record/r3', {
+          id: 'r3',
+          type: 'note',
+          data: { title: 'readable v2' }
+        })
+        vault.put('record/r3', unreadable)
+
+        for (const filterKey of ['record/', 'record-v2/']) {
+          const list = await appDeps.activeVaultList(filterKey)
+          expect(list.map((record) => record.id)).toEqual(['r3'])
+        }
+      })
+
+      test('generateOtpCodesByIds gives no code from its v1 copy', async () => {
+        expect(await appDeps.generateOtpCodesByIds(['r1'])).toEqual([])
+      })
+
+      // A v1 record with no v2 row at all is still there.
+      const putV1Only = () =>
+        vault.put(
+          'record/r4',
+          JSON.stringify({
+            id: 'r4',
+            type: 'login',
+            data: {
+              title: 'v1 only',
+              otp: { type: 'TOTP', secret: 'JBSWY3DPEHPK3PXP' }
+            }
+          })
+        )
+
+      test('exportOtpRecords leaves out its v1 copy', async () => {
+        putV1Only()
+        const exported = await appDeps.exportOtpRecords()
+        expect(exported.map((record) => record.id)).toEqual(['r4'])
+      })
+
+      test('findOtpDuplicates does not match its v1 copy', async () => {
+        putV1Only()
+        expect(
+          await appDeps.findOtpDuplicates({ secret: 'JBSWY3DPEHPK3PXP' })
+        ).toEqual([{ id: 'r4', title: 'v1 only' }])
+      })
+    })
+
+    test('the merged list, the export and the duplicate check take v2 over a differing v1', async () => {
+      await appDeps.activeVaultAdd('record/r5', {
+        id: 'r5',
+        type: 'login',
+        data: {
+          title: 'new',
+          otp: { type: 'TOTP', secret: 'JBSWY3DPEHPK3PXP' }
+        }
+      })
+      vault.put(
+        'record/r5',
+        JSON.stringify({
+          id: 'r5',
+          type: 'login',
+          data: {
+            title: 'old',
+            otp: { type: 'TOTP', secret: 'JBSWY3DPEHPK3PXP' }
+          }
+        })
+      )
+
+      for (const filterKey of ['record/', 'record-v2/']) {
+        const list = await appDeps.activeVaultList(filterKey)
+        expect(list.map((record) => record.data.title)).toEqual(['new'])
+      }
+      const exported = await appDeps.exportOtpRecords()
+      expect(exported.map((record) => record.data.title)).toEqual(['new'])
+      expect(
+        await appDeps.findOtpDuplicates({ secret: 'JBSWY3DPEHPK3PXP' })
+      ).toEqual([{ id: 'r5', title: 'new' }])
+    })
+
+    test('the migration leaves a record it cannot fully read alone', async () => {
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      vault.put(
+        'record/r1',
+        JSON.stringify({ id: 'r1', type: 'note', data: { title: 'stale' } })
+      )
+      vault.put('record-v2/r1', unreadable)
+      await reopen()
+
+      expect(vault.rows.get('record-v2/r1').value).toBe(unreadable)
+      expect(appDeps.getVaultMigrationStatus().ready).toBe(false)
+    })
+
+    test('the migration does not copy a v1 file over a v2 file it cannot read', async () => {
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      await appDeps.activeVaultAdd(
+        'record/r1/file/f1',
+        { name: 'a.txt' },
+        Buffer.from('bytes')
+      )
+      vault.put('record-v2/r1/file/f1', unreadable)
+      await reopen()
+
+      expect(vault.rows.get('record-v2/r1/file/f1').value).toBe(unreadable)
+      expect(appDeps.getVaultMigrationStatus().ready).toBe(false)
+    })
+
+    test('vaultRemove drops the v2 files of a record, readable or not', async () => {
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      await appDeps.activeVaultAdd('record/r1', {
+        id: 'r1',
+        type: 'note',
+        data: { title: 'x' }
+      })
+      await appDeps.activeVaultAdd(
+        'record-v2/r1/file/f1',
+        { name: 'a.txt' },
+        Buffer.from('a')
+      )
+      vault.put('record-v2/r1/file/f2', unreadable)
+      await appDeps.vaultRemove('record/r1')
+
+      expect(
+        [...vault.rows.keys()].filter((key) => key.startsWith('record-v2/'))
+      ).toEqual([])
+    })
+
+    test('opens a vault whose migration waits on an epoch rotation', async () => {
+      vault.put('device/other', deviceRow('other', makeSignKeyPair()))
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      vault.put(
+        'record/r1',
+        JSON.stringify({ id: 'r1', type: 'note', data: { title: 'x' } })
+      )
+      vault.rows.delete('device/other')
+      await reopen({ writable: false })
+
+      expect(appDeps.getIsActiveVaultInitialized()).toBe(true)
+      expect(vault.rows.has('record-v2/r1')).toBe(false)
+    })
+
+    test('resumes a deferred migration once the vault can write and read', async () => {
+      vault.put('device/other', deviceRow('other', makeSignKeyPair()))
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      vault.put(
+        'record/r1',
+        JSON.stringify({ id: 'r1', type: 'note', data: { title: 'x' } })
+      )
+      vault.rows.delete('device/other')
+      await reopen({ writable: false })
+      // The error code lets the surfaces' boot gate fail open at once.
+      expect(appDeps.getVaultMigrationStatus()).toMatchObject({
+        ready: false,
+        inProgress: false,
+        deferred: true,
+        error: 'epoch-key-pending'
+      })
+
+      const fireUpdate = await listen()
+      appDeps.getActiveVaultInstance().base.writable = true
+      await fireUpdate()
+      await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+      expect(appDeps.getVaultMigrationStatus()).toMatchObject({
+        deferred: false,
+        error: null,
+        migratedToSchema: 2
+      })
+    })
+
+    describe('the deferred migration resume', () => {
+      const v1Record = JSON.stringify({
+        id: 'r1',
+        type: 'note',
+        data: { title: 'x' }
+      })
+
+      // The epoch still lists a removed device and this device cannot
+      // write, so it cannot rotate first.
+      const deferOnRotation = async () => {
+        vault.put('device/other', deviceRow('other', makeSignKeyPair()))
+        await appDeps.activeVaultEnsureEpoch({ start: true })
+        vault.put('record/r1', v1Record)
+        vault.rows.delete('device/other')
+        await reopen({ writable: false })
+        expect(appDeps.getVaultMigrationStatus().deferred).toBe(true)
+      }
+
+      // The resume guard is what keeps these deferred: with nothing left
+      // to write, a resume would finish at once.
+      const stillDeferred = () =>
+        expect(appDeps.getVaultMigrationStatus()).toMatchObject({
+          ready: false,
+          deferred: true,
+          error: 'epoch-key-pending'
+        })
+
+      test('waits until this device can open the latest epoch', async () => {
+        const first = putForeignEpoch()
+        vault.put('record/r1', v1Record)
+        await reopen()
+        stillDeferred()
+        vault.rows.delete('record/r1')
+        const fireUpdate = await listen()
+
+        await fireUpdate()
+        stillDeferred()
+
+        putForeignEpoch(2, first, { withMe: true })
+        await fireUpdate()
+        await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+      })
+
+      test('waits until the vault is writable', async () => {
+        await deferOnRotation()
+        vault.rows.delete('record/r1')
+        const fireUpdate = await listen()
+
+        await fireUpdate()
+        stillDeferred()
+
+        appDeps.getActiveVaultInstance().base.writable = true
+        await fireUpdate()
+        await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+      })
+
+      test('defers again when the resume cannot rotate, then resumes later', async () => {
+        await deferOnRotation()
+        const myRow = vault.rows.get('device/me').value
+        vault.rows.delete('device/me')
+        const fireUpdate = await listen()
+        appDeps.getActiveVaultInstance().base.writable = true
+
+        // It can read and write but, without its row, not rotate.
+        await fireUpdate()
+        stillDeferred()
+
+        vault.put('device/me', myRow)
+        await fireUpdate()
+        await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+      })
+
+      test('runs once when a sync lands during a slow resume', async () => {
+        await deferOnRotation()
+        const instance = appDeps.getActiveVaultInstance()
+        let release
+        const gate = new Promise((resolve) => {
+          release = resolve
+        })
+        let extWrites = 0
+        const add = instance.add
+        instance.add = jest.fn(async (key, ...rest) => {
+          if (key === 'vault-ext') {
+            extWrites++
+            await gate
+          }
+          return add(key, ...rest)
+        })
+        const fireUpdate = await listen()
+        instance.base.writable = true
+
+        await fireUpdate()
+        expect(appDeps.getVaultMigrationStatus().inProgress).toBe(true)
+        await fireUpdate()
+        release()
+        await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+        await fireUpdate()
+
+        expect(extWrites).toBe(1)
+        expect(appDeps.getVaultMigrationStatus().lastResult).toMatchObject({
+          alreadyMigrated: false
+        })
+      })
+
+      test('skips a vault opened while the sync ran', async () => {
+        // This vault's sync waits in its rotation until vault2 is open.
+        const { local } = appDeps.getActiveVaultInstance().base
+        const { getUserData } = local
+        let release
+        const gate = new Promise((resolve) => {
+          release = resolve
+        })
+        local.getUserData = async function (key) {
+          await gate
+          return getUserData.call(this, key)
+        }
+        const fireUpdate = await listen()
+        await fireUpdate()
+
+        // vault2 defers for an epoch not sealed to this device.
+        await appDeps.closeActiveVaultInstance()
+        const make = Autopass.getMockImplementation()
+        Autopass.mockImplementationOnce((...args) => {
+          const instance = make(...args)
+          vault = useMemoryVault(instance)
+          vault.put(
+            'device/me',
+            deviceRow('me', me, instance.base.local.keyPair)
+          )
+          putForeignEpoch()
+          vault.put('record/r1', v1Record)
+          return instance
+        })
+        await appDeps.initActiveVaultInstance({
+          id: 'vault2',
+          encryptionKey: 'key'
+        })
+        stillDeferred()
+        vault.rows.delete('record/r1')
+
+        release()
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        stillDeferred()
+      })
+
+      test('stops a resume when another vault opens mid-run', async () => {
+        const first = putForeignEpoch()
+        vault.put('record/r1', v1Record)
+        await reopen()
+        stillDeferred()
+        const fireUpdate = await listen()
+
+        // Only the resume's listing waits: the reconcile and the epoch reads
+        // go on.
+        const held = holdListing(
+          () => appDeps.getVaultMigrationStatus().inProgress
+        )
+        putForeignEpoch(2, first, { withMe: true })
+        await fireUpdate()
+        await waitFor(() => held.listed)
+
+        const vault2Add = await openMigratedVault2()
+        const vault2Status = appDeps.getVaultMigrationStatus()
+        expect(vault2Status).toMatchObject({
+          ready: true,
+          lastResult: { alreadyMigrated: true }
+        })
+
+        held.release()
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        expect(vault2Add).not.toHaveBeenCalled()
+        expect(appDeps.getVaultMigrationStatus()).toEqual(vault2Status)
+      })
+
+      // Nothing is written, so no write fails on the missing key.
+      test('defers on a skipped row while the latest epoch is out of reach', async () => {
+        const first = putForeignEpoch()
+        vault.put('record/r1', v1Record)
+        const v2 = JSON.stringify(convertV1RecordToV2(JSON.parse(v1Record)))
+        vault.put(
+          'record-v2/r1',
+          encryptValue(first, foreignKeys.get(first), v2).envelope
+        )
+        await reopen()
+        stillDeferred()
+        const fireUpdate = await listen()
+
+        putForeignEpoch(2, first, { withMe: true, carry: [first] })
+        await fireUpdate()
+        await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+        expect(appDeps.getVaultMigrationStatus()).toMatchObject({
+          deferred: false,
+          error: null,
+          migratedToSchema: 2
+        })
+      })
+
+      test('resumes when the key lands during its listing', async () => {
+        const first = putForeignEpoch()
+        vault.put('record/r1', v1Record)
+        vault.put('record-v2/r1', unreadable)
+        // Once a scan has listed the unreadable row, a rotation sealed to me
+        // lands, the row goes away and the view moves.
+        let landed = false
+        const wrap = (instance) => {
+          const find = instance.base.view.find
+          instance.base.view.find = jest.fn((...args) => ({
+            async *[Symbol.asyncIterator]() {
+              let listed = false
+              for await (const row of find(...args)) {
+                if (row.key === 'record-v2/r1') listed = true
+                yield row
+              }
+              if (listed && !landed) {
+                landed = true
+                putForeignEpoch(2, first, { withMe: true })
+                vault.rows.delete('record-v2/r1')
+                instance.emit('update')
+              }
+            }
+          }))
+        }
+        await reopen({ wrap })
+
+        expect(landed).toBe(true)
+        await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+      })
+
+      test('does not defer on a skipped row under a readable latest epoch', async () => {
+        await appDeps.activeVaultEnsureEpoch({ start: true })
+        vault.put('record/r1', v1Record)
+        vault.put('record-v2/r1', unreadable)
+        await reopen()
+        const { lastResult } = appDeps.getVaultMigrationStatus()
+        expect(appDeps.getVaultMigrationStatus()).toMatchObject({
+          ready: false,
+          deferred: false,
+          error: 'Migration incomplete'
+        })
+        const fireUpdate = await listen()
+
+        await fireUpdate()
+        expect(appDeps.getVaultMigrationStatus().lastResult).toBe(lastResult)
+      })
+
+      test('resumes when an epoch that leaves it out lands during its listing', async () => {
+        const { id: mine } = await appDeps.activeVaultEnsureEpoch({
+          start: true
+        })
+        vault.put('record/r1', v1Record)
+        const v2 = JSON.stringify(convertV1RecordToV2(JSON.parse(v1Record)))
+        // As the record listing starts, another device rotates without me
+        // and writes the record's v2 row under its new epoch.
+        let second = null
+        const wrap = (instance) => {
+          const find = instance.base.view.find
+          instance.base.view.find = jest.fn((view, range) => {
+            if (!range?.gte && !second) {
+              second = putForeignEpoch(2, mine)
+              vault.put(
+                'record-v2/r1',
+                encryptValue(second, foreignKeys.get(second), v2).envelope
+              )
+              instance.emit('update')
+            }
+            return find(view, range)
+          })
+        }
+        await reopen({ wrap })
+        expect(second).not.toBeNull()
+        stillDeferred()
+        const fireUpdate = await listen()
+
+        putForeignEpoch(3, second, { withMe: true, carry: [second] })
+        await fireUpdate()
+        await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+        expect(appDeps.getVaultMigrationStatus()).toMatchObject({
+          deferred: false,
+          error: null,
+          migratedToSchema: 2
+        })
+      })
+
+      test('resumes when a rotation carries the key of a losing fork', async () => {
+        const { id: mine } = await appDeps.activeVaultEnsureEpoch({
+          start: true
+        })
+        vault.put('record/r1', v1Record)
+        const v2 = JSON.stringify(convertV1RecordToV2(JSON.parse(v1Record)))
+        // Two epochs at seq 2. The first leaves me out and seals the
+        // record's v2 row; its author then leaves the roster (the next
+        // putForeignEpoch replaces device/other), so it is not accepted.
+        // The second is sealed to me and is the latest.
+        const lost = putForeignEpoch(2, mine)
+        vault.put(
+          'record-v2/r1',
+          encryptValue(lost, foreignKeys.get(lost), v2).envelope
+        )
+        const won = putForeignEpoch(2, mine, { withMe: true })
+        await reopen()
+        expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+          epoch: won,
+          canRead: true
+        })
+        expect(appDeps.getVaultMigrationStatus()).toMatchObject({
+          ready: false,
+          deferred: false,
+          error: 'Migration incomplete'
+        })
+        const fireUpdate = await listen()
+
+        putForeignEpoch(3, won, { withMe: true, carry: [lost] })
+        await fireUpdate()
+        await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+        expect(appDeps.getVaultMigrationStatus()).toMatchObject({
+          error: null,
+          migratedToSchema: 2
+        })
+      })
+    })
+
+    test('pushes the status as it stands after a resumed migration', async () => {
+      vault.put('device/other', deviceRow('other', makeSignKeyPair()))
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      vault.put(
+        'record/r1',
+        JSON.stringify({ id: 'r1', type: 'note', data: { title: 'x' } })
+      )
+      vault.rows.delete('device/other')
+      await reopen({ writable: false })
+      const pushes = []
+      appDeps.setEpochStatusListener((status) => pushes.push(status))
+
+      // Armed once the reconcile ran, so the next vault-ext read is the
+      // resumed migration's: a device pairs and the epoch rotates then.
+      const instance = appDeps.getActiveVaultInstance()
+      let arming = false
+      let armed = false
+      const get = instance.get
+      instance.get = jest.fn(async (key) => {
+        if (armed && key === 'vault-ext') {
+          armed = false
+          vault.put('device/new', deviceRow('new', makeSignKeyPair()))
+          await appDeps.activeVaultEnsureEpoch({ start: false })
+        }
+        return get(key)
+      })
+      const onUpdate = jest.fn(() => {
+        if (arming) armed = true
+      })
+      await appDeps.initListener({ vaultId: 'vault1', onUpdate })
+
+      // Let the reopen's own sync settle first, so the resume below is the
+      // one the hook sees, whatever the sync's internal awaits look like.
+      instance.emit('update')
+      await waitFor(() => onUpdate.mock.calls.length > 0)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      arming = true
+      instance.base.writable = true
+      instance.emit('update')
+      await waitFor(() => appDeps.getVaultMigrationStatus().ready)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+        seq: 3,
+        members: ['me', 'new']
+      })
+      expect(pushes.at(-1)).toMatchObject({ seq: 3, members: ['me', 'new'] })
+    })
+
+    test('activeVaultAdd refuses to write under an epoch that still lists a removed device', async () => {
+      vault.put('device/other', deviceRow('other', makeSignKeyPair()))
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      vault.rows.delete('device/other')
+      appDeps.getActiveVaultInstance().base.writable = false
+
+      await expect(
+        appDeps.activeVaultAdd('note/1', { title: 'x' })
+      ).rejects.toThrow('Vault key must rotate first')
+      expect(vault.rows.has('note/1')).toBe(false)
+    })
+
+    test.each([
+      ['generateHotpNext', () => appDeps.generateHotpNext('r1')],
+      [
+        'addOtpToRecord',
+        () => appDeps.addOtpToRecord('r1', 'JBSWY3DPEHPK3PXP')
+      ],
+      ['removeOtpFromRecord', () => appDeps.removeOtpFromRecord('r1')]
+    ])(
+      '%s shows the rotation wording under an epoch that still lists a removed device',
+      async (_, write) => {
+        vault.put('device/other', deviceRow('other', makeSignKeyPair()))
+        await appDeps.activeVaultEnsureEpoch({ start: true })
+        await appDeps.activeVaultAdd('record/r1', {
+          id: 'r1',
+          type: 'note',
+          data: { title: 'x' }
+        })
+        await appDeps.addOtpToRecord(
+          'r1',
+          'otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP&counter=0'
+        )
+        vault.rows.delete('device/other')
+        appDeps.getActiveVaultInstance().base.writable = false
+
+        await expect(write()).rejects.toMatchObject({
+          message: writeErrorMessage(new EpochRotationPendingError())
+        })
+      }
+    )
+
+    test('the update listener rotates when needed and pushes status only on change', async () => {
+      const pushes = []
+      appDeps.setEpochStatusListener((status) => pushes.push(status))
+      const fireUpdate = await listen()
+
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      await fireUpdate()
+      expect(pushes).toHaveLength(1)
+      expect(pushes[0]).toMatchObject({
+        vaultId: 'vault1',
+        legacy: false,
+        members: ['me']
+      })
+
+      await fireUpdate()
+      expect(pushes).toHaveLength(1)
+
+      vault.put('device/other', deviceRow('other', makeSignKeyPair()))
+      await fireUpdate()
+      expect(pushes).toHaveLength(2)
+      expect(pushes[1]).toMatchObject({ seq: 2, members: ['me', 'other'] })
+    })
+
+    test('the update listener pushes the status when the rotation fails', async () => {
+      const pushes = []
+      appDeps.setEpochStatusListener((status) => pushes.push(status))
+      const fireUpdate = await listen()
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      const instance = appDeps.getActiveVaultInstance()
+      const add = instance.add
+      instance.add = jest.fn(async (key, ...rest) => {
+        if (key.startsWith('epoch/')) throw new Error('disk full')
+        return add(key, ...rest)
+      })
+      vault.put('device/legacy', JSON.stringify({ id: 'legacy' }))
+      vault.put('device/other', deviceRow('other', makeSignKeyPair()))
+      await fireUpdate()
+
+      expect(pushes).toHaveLength(1)
+      expect(pushes[0]).toMatchObject({
+        vaultId: 'vault1',
+        members: ['me'],
+        uncovered: ['legacy']
+      })
+    })
+
+    test('drops a status computed for a vault that closed meanwhile', async () => {
+      const { local } = appDeps.getActiveVaultInstance().base
+      const { getUserData } = local
+      let release
+      const gate = new Promise((resolve) => {
+        release = resolve
+      })
+      // The rotation the update starts waits here until the vault closed.
+      local.getUserData = async function (key) {
+        await gate
+        return getUserData.call(this, key)
+      }
+      const pushes = []
+      appDeps.setEpochStatusListener((status) => pushes.push(status))
+      const fireUpdate = await listen()
+      await fireUpdate()
+
+      await appDeps.closeActiveVaultInstance()
+      release()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(pushes).toEqual([])
+    })
+
+    test('the update listener pushes again when no listener got the status yet', async () => {
+      const fireUpdate = await listen()
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      await fireUpdate()
+
+      const pushes = []
+      let fail = true
+      appDeps.setEpochStatusListener((status) => {
+        if (fail) {
+          fail = false
+          throw new Error('client gone')
+        }
+        pushes.push(status)
+      })
+      await fireUpdate()
+      expect(pushes).toHaveLength(0)
+      await fireUpdate()
+      expect(pushes).toHaveLength(1)
+      expect(pushes[0]).toMatchObject({ vaultId: 'vault1', members: ['me'] })
+    })
+
+    describe('a lock during the first kick of a legacy vault', () => {
+      const OWED = 'lockwright/epoch-start-owed'
+      let userData
+
+      beforeEach(() => {
+        userData = appDeps.getActiveVaultInstance().base.local.userData
+      })
+
+      // The local core outlives the lock, so its user data does too.
+      const keepUserData = (instance) => {
+        instance.base.local.userData = userData
+      }
+
+      test('drops a kick rotation that reaches the worklet after the lock until the next start', async () => {
+        let late
+        await reopen({
+          wrap: (instance) => {
+            keepUserData(instance)
+            // Locked: the kick's rotation call arrives before the unlock.
+            late = expect(
+              appDeps.activeVaultEnsureEpoch({ start: true })
+            ).rejects.toThrow('Vault not initialised')
+          }
+        })
+        await late
+        expect(userData.has(OWED)).toBe(false)
+
+        const fireUpdate = await listen()
+        await fireUpdate()
+        expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+          legacy: true
+        })
+
+        // The next kick or leave starts it.
+        expect(
+          await appDeps.activeVaultEnsureEpoch({ start: true })
+        ).toMatchObject({ rotated: true, seq: 1 })
+        expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+          legacy: false
+        })
+      })
+
+      test('owes a kick rotation the lock broke and pays it on the first update after the unlock', async () => {
+        // The lock closes the vault under the rotation's epoch append.
+        const instance = appDeps.getActiveVaultInstance()
+        const add = instance.add
+        instance.add = jest.fn(async (key, ...rest) => {
+          if (key.startsWith('epoch/')) throw new Error('closed')
+          return add(key, ...rest)
+        })
+        await expect(
+          appDeps.activeVaultEnsureEpoch({ start: true })
+        ).rejects.toThrow('closed')
+        expect(userData.get(OWED)?.toString()).toBe('1')
+
+        // Opening does not pay it.
+        await reopen({ wrap: keepUserData })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+          legacy: true
+        })
+        expect(userData.get(OWED)?.toString()).toBe('1')
+
+        const fireUpdate = await listen()
+        await fireUpdate()
+        expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+          legacy: false,
+          seq: 1,
+          members: ['me']
+        })
+        expect(userData.get(OWED)?.toString()).toBe('0')
+      })
+    })
+
+    describe('record routing under an epoch', () => {
+      const secrets = ['hunter2-secret', 'note-secret', 'JBSWY3DPEHPK3PXP']
+      const fileBytes = 'attachment-secret'
+
+      // Every row outside the plaintext keys is an envelope, and no secret
+      // shows in any stored value or file.
+      const expectSealed = () => {
+        for (const [key, { value, file }] of vault.rows) {
+          if (!isPlaintextKey(key)) {
+            expect({ key, enc: JSON.parse(value).$enc }).toEqual({
+              key,
+              enc: 1
+            })
+          }
+          for (const secret of secrets) expect(value).not.toContain(secret)
+          if (file) expect(file.toString()).not.toContain(fileBytes)
+        }
+      }
+
+      beforeEach(async () => {
+        await appDeps.activeVaultEnsureEpoch({ start: true })
+      })
+
+      test('v1 and v2 record writes and their projections are sealed', async () => {
+        await appDeps.activeVaultAdd('record/r1', {
+          id: 'r1',
+          type: 'login',
+          data: { title: 'Bank', password: 'hunter2-secret', websites: [] }
+        })
+        await appDeps.activeVaultAdd('record-v2/r2', {
+          id: 'r2',
+          type: 'note',
+          schema: 2,
+          data: { title: 'Note', note: 'note-secret' }
+        })
+        await appDeps.activeVaultAdd(
+          'record/r1/file/f1',
+          { name: 'a.txt' },
+          Buffer.from(fileBytes)
+        )
+
+        expect(
+          [...vault.rows.keys()].filter((k) => k.startsWith('record'))
+        ).toEqual(
+          expect.arrayContaining([
+            'record/r1',
+            'record-v2/r1',
+            'record/r2',
+            'record-v2/r2',
+            'record/r1/file/f1',
+            'record-v2/r1/file/f1'
+          ])
+        )
+        expectSealed()
+      })
+
+      test('record reads, raw reads, and OTP edits go through the store', async () => {
+        await appDeps.activeVaultAdd('record/r1', {
+          id: 'r1',
+          type: 'login',
+          data: { title: 'Bank', password: 'hunter2-secret', websites: [] }
+        })
+
+        expect(await appDeps.activeVaultGet('record/r1')).toMatchObject({
+          data: { password: 'hunter2-secret' }
+        })
+        await appDeps.addOtpToRecord('r1', 'JBSWY3DPEHPK3PXP')
+        expectSealed()
+
+        const [code] = await appDeps.generateOtpCodesByIds(['r1'])
+        expect(code).toMatchObject({ recordId: 'r1' })
+        expect(code.code).toMatch(/^\d{6}$/)
+        expect(await appDeps.activeVaultGet('record-v2/r1')).toMatchObject({
+          data: { password: 'hunter2-secret' },
+          otpPublic: { type: 'TOTP' }
+        })
+        await appDeps.removeOtpFromRecord('r1')
+        expectSealed()
+      })
+
+      test('the reconcile copies a sealed v1 file through the store', async () => {
+        const fireUpdate = await listen()
+        await appDeps.activeVaultAdd(
+          'record/r1/file/f1',
+          { name: 'a.txt' },
+          Buffer.from(fileBytes)
+        )
+        vault.rows.delete('record-v2/r1/file/f1')
+        await fireUpdate()
+
+        expect(
+          await appDeps.activeVaultGetFile('record-v2/r1/file/f1')
+        ).toEqual(Buffer.from(fileBytes))
+        expectSealed()
+      })
+    })
+
+    describe('incremental reconcile', () => {
+      const v1 = { id: 'r1', type: 'note', data: { title: 'kept' } }
+
+      // A v1 record the reconcile has already seen, with its v2 twin.
+      const seenRecord = async () => {
+        const fireUpdate = await listen()
+        await appDeps.activeVaultEnsureEpoch({ start: true })
+        vault.put('record/r1', JSON.stringify(v1))
+        await fireUpdate()
+        expect(vault.rows.has('record-v2/r1')).toBe(true)
+        return fireUpdate
+      }
+
+      test('writes nothing into a vault opened mid-run', async () => {
+        await listen()
+        await appDeps.activeVaultEnsureEpoch({ start: true })
+        const instance = appDeps.getActiveVaultInstance()
+        const held = holdListing()
+        vault.put('record/r1', JSON.stringify(v1))
+        instance.emit('update')
+        await waitFor(() => held.listed)
+
+        const vault2Add = await openMigratedVault2()
+        held.release()
+        await new Promise((resolve) => setTimeout(resolve, 100))
+
+        expect(vault2Add).not.toHaveBeenCalled()
+      })
+
+      test('mirrors a v1 delete to v2 when every record is readable', async () => {
+        const fireUpdate = await seenRecord()
+        vault.rows.delete('record/r1')
+        await fireUpdate()
+
+        expect(vault.rows.has('record-v2/r1')).toBe(false)
+      })
+
+      test('keeps the v2 twin of a v1 record it cannot read', async () => {
+        const fireUpdate = await seenRecord()
+        vault.put('record/r1', unreadable)
+        await fireUpdate()
+
+        expect(vault.rows.has('record-v2/r1')).toBe(true)
+        expect(await appDeps.activeVaultGet('record-v2/r1')).toMatchObject({
+          data: { title: 'kept' }
+        })
+      })
+
+      test('does not rebuild a v2 record it cannot read from its v1', async () => {
+        const fireUpdate = await seenRecord()
+        vault.put('record-v2/r1', unreadable)
+        vault.put('record/r1', JSON.stringify({ ...v1, data: { title: 'v1' } }))
+        await fireUpdate()
+
+        expect(vault.rows.get('record-v2/r1').value).toBe(unreadable)
+      })
+
+      test('does not copy a v1 file over a v2 file it cannot read', async () => {
+        const fireUpdate = await listen()
+        await appDeps.activeVaultEnsureEpoch({ start: true })
+        await appDeps.activeVaultAdd(
+          'record/r1/file/f1',
+          { name: 'a.txt' },
+          Buffer.from('bytes')
+        )
+        vault.put('record-v2/r1/file/f1', unreadable)
+        await fireUpdate()
+
+        expect(vault.rows.get('record-v2/r1/file/f1').value).toBe(unreadable)
+      })
+
+      test('mirrors a v1 delete made while it could not read the record', async () => {
+        const fireUpdate = await seenRecord()
+        vault.put('record/r1', unreadable)
+        await fireUpdate()
+        vault.rows.delete('record/r1')
+        await fireUpdate()
+
+        expect(vault.rows.has('record-v2/r1')).toBe(false)
+      })
+
+      test('mirrors a v1 delete while another record is unreadable', async () => {
+        const fireUpdate = await seenRecord()
+        vault.put('record/r2', unreadable)
+        vault.rows.delete('record/r1')
+        await fireUpdate()
+
+        expect(vault.rows.has('record-v2/r1')).toBe(false)
+        expect(vault.rows.get('record/r2').value).toBe(unreadable)
+      })
+
+      test('forgets a mirrored v1 delete while another record is unreadable', async () => {
+        const fireUpdate = await seenRecord()
+        vault.put('record/r2', unreadable)
+        vault.rows.delete('record/r1')
+        vault.rows.delete('record-v2/r1')
+        await fireUpdate()
+
+        // The id comes back as a v2 record with no v1 row.
+        await appDeps.activeVaultAdd('record-v2/r1', {
+          ...v1,
+          schema: 2
+        })
+        vault.rows.delete('record/r1')
+        await fireUpdate()
+        expect(vault.rows.has('record-v2/r1')).toBe(true)
+      })
+
+      test('mirrors a v1 delete while a rotation is owed and every key is held', async () => {
+        const fireUpdate = await listen()
+        putForeignEpoch(1, null, { withMe: true })
+        await appDeps.activeVaultAdd('record/r1', v1)
+        await fireUpdate()
+        // The only author leaves, and this device cannot rotate yet.
+        vault.rows.delete('device/other')
+        appDeps.getActiveVaultInstance().base.writable = false
+        vault.rows.delete('record/r1')
+        await fireUpdate()
+
+        expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+          epoch: null,
+          canRead: true
+        })
+        expect(vault.rows.has('record-v2/r1')).toBe(false)
+      })
+
+      test('mirrors a v1 delete made while a migration rerun could not read it', async () => {
+        const { id: mine } = await appDeps.activeVaultEnsureEpoch({
+          start: true
+        })
+        vault.put('record/r1', JSON.stringify(v1))
+        // r2 leaves the migration incomplete, so a new epoch reruns it.
+        vault.put('record/r2', JSON.stringify({ ...v1, id: 'r2' }))
+        vault.put('record-v2/r2', unreadable)
+        await reopen()
+        expect(vault.rows.has('record-v2/r1')).toBe(true)
+        const { lastResult } = appDeps.getVaultMigrationStatus()
+        const fireUpdate = await listen()
+        vault.put('record/r1', unreadable)
+        await fireUpdate()
+
+        putForeignEpoch(2, mine, { withMe: true })
+        await fireUpdate()
+        expect(appDeps.getVaultMigrationStatus().lastResult).not.toBe(
+          lastResult
+        )
+        vault.rows.delete('record/r1')
+        await fireUpdate()
+
+        expect(vault.rows.has('record-v2/r1')).toBe(false)
+      })
+
+      test('deletes nothing while the latest epoch is unreadable here', async () => {
+        const fireUpdate = await seenRecord()
+        const { epoch } = await appDeps.activeVaultGetEpochStatus()
+        putForeignEpoch(2, epoch)
+        vault.rows.delete('record/r1')
+        await fireUpdate()
+
+        expect((await appDeps.activeVaultGetEpochStatus()).canRead).toBe(false)
+        expect(vault.rows.has('record-v2/r1')).toBe(true)
+      })
+    })
+  })
+
+  describe('epoch API without an active vault', () => {
+    test('activeVaultEnsureEpoch and activeVaultGetEpochStatus throw', async () => {
+      await expect(
+        appDeps.activeVaultEnsureEpoch({ start: true })
+      ).rejects.toThrow('Vault not initialised')
+      await expect(appDeps.activeVaultGetEpochStatus()).rejects.toThrow(
+        'Vault not initialised'
+      )
     })
   })
 })
