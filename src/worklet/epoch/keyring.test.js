@@ -77,6 +77,22 @@ describe('keyring', () => {
     expect(out.file.toString()).toBe('file bytes')
   })
 
+  it('draws a fresh 24-byte nonce for every value, file and check it seals', () => {
+    const nonces = []
+    for (let i = 0; i < 500; i++) {
+      const { envelope } = encryptValue('e1', ring.e1, 'same', Buffer.from('f'))
+      const { n, fn } = JSON.parse(envelope)
+      nonces.push(n, fn, sealCheck(ring.e1).n)
+    }
+
+    for (const nonce of nonces) {
+      expect(Buffer.from(nonce, 'base64')).toHaveLength(
+        sodium.crypto_secretbox_NONCEBYTES
+      )
+    }
+    expect(new Set(nonces).size).toBe(nonces.length)
+  })
+
   it('tells plaintext values from envelopes', () => {
     expect(isEnvelope('{"title":"x"}')).toBe(false)
     expect(isEnvelope('not json')).toBe(false)
