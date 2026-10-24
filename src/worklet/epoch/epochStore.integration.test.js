@@ -1077,6 +1077,62 @@ describe('epochStore over real Autopass', () => {
     expect((await rawEnvelope(B, 'record/b2')).$enc).toBe(1)
   })
 
+  it('never writes under an older epoch once a middle epoch row is deleted', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    const first = await A.store.ensureEpoch({ start: true })
+    const D = await makePeer('D', A)
+    await A.instance.addWriter(D.instance.writerKey)
+    await addDevice(A, D.row)
+    await sync(A, B, D)
+    // D's box carries the first key too.
+    const joined = await A.store.ensureEpoch({ start: false })
+    expect(joined).toMatchObject({ rotated: true, members: ['A', 'B', 'D'] })
+    await sync(A, B, D)
+    expect(await D.store.status()).toMatchObject({ canRead: true })
+    await kick(A, D)
+    await sync(A, B, D)
+
+    // Stands in for D's delete that Autobase orders before its removal:
+    // the kick epoch no longer chains, and latest falls back to the first.
+    await B.instance.remove(`epoch/${joined.id}`)
+    await sync(A, B, D)
+
+    await B.store.add('record/after', 'secret')
+    expect((await rawEnvelope(B, 'record/after')).e).not.toBe(first.id)
+    await sync(A, B, D)
+    expect(await value(A, 'record/after')).toBe('secret')
+    expect(await D.store.get('record/after')).toBeNull()
+  })
+
+  it('rotates once, not forever, past an unchained top seq sealed to every member', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    await A.store.ensureEpoch({ start: true })
+    await sync(A, B)
+    const id = '0f'.repeat(16)
+    const planted = epochBy(B.keyPair, {
+      id,
+      seq: Number.MAX_SAFE_INTEGER,
+      ring: { [id]: generateEpochKey() },
+      to: [
+        ['A', A.keyPair],
+        ['B', B.keyPair]
+      ]
+    })
+    await B.instance.add(`epoch/${id}`, JSON.stringify(planted))
+    await sync(A, B)
+
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: true,
+      seq: 2
+    })
+    expect(await A.store.ensureEpoch({ start: false })).toMatchObject({
+      rotated: false,
+      reason: 'current'
+    })
+    await A.store.add('record/r', 'v')
+    expect((await A.store.status()).seq).toBe(2)
+  })
+
   it('names a roster row by its key, ignoring a row that claims another id', async () => {
     const [A, B] = await setup(['A', 'B'])
     const attacker = makeKeyPair()

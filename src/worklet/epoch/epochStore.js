@@ -507,12 +507,31 @@ export const createEpochStore = ({
   const sealablePairs = (sealable) =>
     sealable.map((row) => `${row.id}:${row.masterTopic.toLowerCase()}`)
 
+  // A record above latest by a current author, whose key I hold and
+  // latest's box for me lacks: the chain under it broke (a deleted or
+  // rewritten record), so latest is older than the history and its key may
+  // have reached a removed device through the missing record's box.
+  const skippedAhead = (latest) => {
+    const box = openedBoxes.get(`${latest.id}:${latest.sig}`)
+    const authors = new Set(
+      bound(roster).flatMap((row) => row.masterTopic?.toLowerCase() ?? [])
+    )
+    return epochs.valid.some(
+      (record) =>
+        record.seq > latest.seq &&
+        authors.has(record.by) &&
+        Object.hasOwn(ring, record.id) &&
+        box?.[record.id] !== ring[record.id]
+    )
+  }
+
   // Never write under an epoch sealed to someone outside the roster. Once an
   // epoch row exists, a missing latest means a rotation is owed too.
   const isStale = () => {
     if (legacy) return false
     const { latest } = epochs
     if (!latest) return true
+    if (skippedAhead(latest)) return true
     const allowed = sealablePairs(coverage().sealable)
     return !memberPairs(latest).every((pair) => allowed.includes(pair))
   }
@@ -657,7 +676,8 @@ export const createEpochStore = ({
     if (!ring[latest.id]) return skip('pending')
     if (
       sameSet(memberPairs(latest), sealablePairs(sealable)) &&
-      !holdsMoreThan(latest, keyPair)
+      !holdsMoreThan(latest, keyPair) &&
+      !skippedAhead(latest)
     ) {
       return skip('current')
     }
