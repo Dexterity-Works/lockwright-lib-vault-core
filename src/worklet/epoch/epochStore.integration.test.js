@@ -13,6 +13,7 @@ import {
   EpochKeyUnavailableError,
   EpochRecordWriteError,
   EpochRotationPendingError,
+  encryptValue,
   generateEpochKey,
   openRing,
   sealCheck,
@@ -478,6 +479,41 @@ describe('epochStore over real Autopass', () => {
     expect((await rawEnvelope(B, 'record/y')).e).toBe(real.id)
     await sync(A, B)
     expect(await value(A, 'record/y')).toBe('w')
+  })
+
+  it('opens no box of a record whose signature fails, on catch-up too', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    const start = await A.store.ensureEpoch({ start: true })
+    await sync(A, B)
+
+    // A's own record with B's box sealed again: the box and the check open
+    // with the key, the signature does not.
+    const id = 'ab'.repeat(16)
+    const key = generateEpochKey()
+    const signed = epochBy(A.keyPair, {
+      id,
+      seq: 2,
+      prev: start.id,
+      ring: { [id]: key },
+      to: [
+        ['A', A.keyPair],
+        ['B', B.keyPair]
+      ]
+    })
+    const resealed = sealRing({ [id]: key }, [
+      { id: 'B', masterTopic: B.keyPair.publicKey.toString('hex') }
+    ]).B
+    const forged = {
+      ...signed,
+      members: { ...signed.members, B: { ...signed.members.B, box: resealed } }
+    }
+    // B is offline while the record and an envelope under it land.
+    await A.instance.add(`epoch/${id}`, JSON.stringify(forged))
+    await A.instance.add('record/f', encryptValue(id, key, 'forged').envelope)
+    await sync(A, B)
+
+    expect(await B.store.get('record/f')).toBeNull()
+    expect(await B.store.status()).toMatchObject({ epoch: start.id, seq: 1 })
   })
 
   it.each([
