@@ -956,6 +956,11 @@ describe('epochStore over real Autopass', () => {
     const L2 = await makePeer('L', A, L.keyPair)
     await A.instance.addWriter(L2.instance.writerKey)
     await sync(A, B, L2)
+    // A pending indexer acks with a null block on its own; force it so the
+    // local core is never empty here.
+    await L2.instance.base.ack()
+    await sync(A, B, L2)
+    expect(L2.instance.base.local.length).toBeGreaterThan(0)
     expect(await L2.store.status()).toMatchObject({
       canRead: false,
       revoked: false
