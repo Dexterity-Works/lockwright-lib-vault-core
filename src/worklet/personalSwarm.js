@@ -2,7 +2,7 @@ import b4a from 'b4a'
 import Hyperswarm from 'hyperswarm'
 
 import { getPersonalKeyPair, getVaultsInstance } from './appDeps'
-import { getConfig } from './utils/swarm'
+import { getConfig, networkCreated, networkOptions } from './utils/swarm'
 import { workletLogger } from './utils/workletLogger'
 
 const FRAME_HEADER_BYTES = 4
@@ -33,10 +33,15 @@ export const personalSwarmInit = async () => {
   const store = vaultsInstance.store
   const conf = await getConfig(store)
 
-  swarm = new Hyperswarm({
-    keyPair: await store.createKeyPair('personal-swarm'),
-    relayThrough: conf?.current?.blindRelays ?? null
-  })
+  swarm = networkCreated(
+    'personalSwarm',
+    new Hyperswarm(
+      networkOptions({
+        keyPair: await store.createKeyPair('personal-swarm'),
+        relayThrough: conf?.current?.blindRelays ?? null
+      })
+    )
+  )
 
   swarm.on('connection', (connection) => {
     handleIncomingConnection(connection).catch((err) => {
@@ -120,9 +125,14 @@ export const personalSwarmSend = async (targetTopicHex, envelopeHex) => {
   const store = vaultsInstance.store
   const conf = await getConfig(store)
 
-  const sendSwarm = new Hyperswarm({
-    relayThrough: conf?.current?.blindRelays ?? null
-  })
+  const sendSwarm = networkCreated(
+    'personalSend',
+    new Hyperswarm(
+      networkOptions({
+        relayThrough: conf?.current?.blindRelays ?? null
+      })
+    )
+  )
 
   return new Promise((resolve) => {
     let resolved = false
