@@ -9,6 +9,11 @@
 // The public bootstrap list is read from hyperdht's own source, not copied.
 // hyperdht falls back to it for any falsy `bootstrap` (hyperdht/index.js:28,
 // `opts.bootstrap || BOOTSTRAP_NODES`); `[]` is an isolated node and passes.
+//
+// Not covered: egress that is not UDX. The worklet's favicon fetch
+// (src/worklet/faviconManager.js, bare-fetch) and optional Sentry are TCP
+// and are not exercised by the harness; Layers 2 and 3 cut them off at the
+// container network instead.
 const net = require('net')
 const os = require('os')
 
@@ -154,8 +159,9 @@ const toHex = (key) => {
  */
 const assertRelays = (relayThrough, who) => {
   if (relayThrough === undefined || relayThrough === null) return
+  // hyperswarm calls a function as (force, swarm); ask it as if forced.
   const value =
-    typeof relayThrough === 'function' ? relayThrough() : relayThrough
+    typeof relayThrough === 'function' ? relayThrough(true, null) : relayThrough
   if (value === undefined || value === null) return
   const keys = Array.isArray(value) ? value : [value]
   for (const key of keys) {
@@ -169,6 +175,8 @@ const assertRelays = (relayThrough, who) => {
 }
 
 const assertDestination = (host, who) => {
+  // udx sends to 127.0.0.1 when no host is given (udx-native/lib/socket.js:266)
+  if (host === undefined || host === null) return
   if (!isLocalHost(host)) {
     throw breach(`${who} to ${host}: not a local address`)
   }
@@ -184,8 +192,11 @@ const guardDHT = (HyperDHT) => {
     constructor(opts = {}) {
       assertBootstrap(opts, 'HyperDHT')
       super(opts)
-      if (this.bootstrapNodes === BOOTSTRAP_NODES) {
-        throw breach('HyperDHT ended up on the public bootstrap list')
+      // dht-rpc rebuilds the list through parseNode, so check what it kept.
+      for (const node of this.bootstrapNodes) {
+        if (!isLocalHost(node.host)) {
+          throw breach(`HyperDHT kept a non-local bootstrap node ${node.host}`)
+        }
       }
     }
   }

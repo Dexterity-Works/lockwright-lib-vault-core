@@ -1,14 +1,20 @@
+import fs from 'fs'
 import path from 'path'
 
+import guard from './guard.cjs'
 import { Peer } from './peer.js'
 import { startTestnet } from './testnet.js'
+import { writeTimeline } from './timeline.js'
 import { mkdtemp, removeDir } from './tmp.js'
+import { Tracer } from './tracer.js'
 
 /* global jest */
 
 // A private copy of the worklet module graph per peer. appDeps holds one
-// device in module singletons, so every peer needs its own registry; the
-// guard's jest.mock wrappers apply inside it too.
+// device in module singletons, so every peer needs its own registry. The
+// mocked libraries (hyperdht, hyperswarm, udx-native) come from jest's
+// shared mock registry, so peers share those module instances; they keep
+// no per-device state.
 export const loadIsolatedModules = () => {
   let modules
   jest.isolateModules(() => {
@@ -23,30 +29,54 @@ export const loadIsolatedModules = () => {
   return modules
 }
 
+// Set by test/network/jest.environment.cjs from jest-circus events.
+const currentTest = () =>
+  globalThis.__lockwrightNetworkTest ?? {
+    name: 'unknown test',
+    failed: false,
+    messages: []
+  }
+
 /**
  * A testnet plus K started peers (master vault open, no active vault yet).
- * @param {{ peers?: string[], size?: number, relayThrough?: any, onCreate?: Function, onUpdate?: Function, name?: string }} options
+ * Every peer writes a JSONL trace under `<dir>/traces/`; when the test
+ * fails (or `keep` is set) `destroy()` merges them into a timeline under
+ * `test-artifacts/<test name>/` and prints its path.
+ * @param {{ peers?: string[], size?: number, relayThrough?: any, relayAddresses?: Set<string>, onCreate?: Function, onUpdate?: Function, onEvent?: Function, name?: string }} options
  */
 export const createNetwork = async ({
   peers = ['A', 'B'],
   size = 3,
   relayThrough = [],
+  relayAddresses = new Set(),
   onCreate,
   onUpdate,
+  onEvent,
   name = 'net'
 } = {}) => {
   const testnet = await startTestnet({ size })
   const dir = mkdtemp(name)
+  const tracesDir = path.join(dir, 'traces')
+  fs.mkdirSync(tracesDir, { recursive: true })
   const byId = {}
   const list = []
+  const tracers = {}
   try {
     for (const id of peers) {
+      const tracer = new Tracer({
+        peer: id,
+        file: path.join(tracesDir, `${id}.jsonl`),
+        relayAddresses,
+        onEvent
+      })
+      tracers[id] = tracer
       const peer = new Peer({
         id,
         modules: loadIsolatedModules(),
         bootstrap: testnet.bootstrap,
         relayThrough,
         dir: path.join(dir, id),
+        tracer,
         onCreate,
         onUpdate
       })
@@ -56,21 +86,71 @@ export const createNetwork = async ({
     }
   } catch (error) {
     for (const peer of list.reverse()) await peer.stop().catch(() => {})
+    for (const tracer of Object.values(tracers)) tracer.close()
     await testnet.destroy()
     removeDir(dir)
     throw error
   }
+  let destroyed = null
   return {
     testnet,
     bootstrap: testnet.bootstrap,
     peers: byId,
     list,
+    tracers,
     dir,
-    destroy: async ({ keep = false } = {}) => {
-      for (const peer of [...list].reverse()) await peer.stop({ keep })
-      await testnet.destroy()
-      if (!keep) removeDir(dir)
+    traceFiles: () => Object.values(tracers).map((t) => t.file),
+    destroy: ({ keep = false } = {}) => {
+      destroyed ??= destroy({ keep })
+      return destroyed
     }
+  }
+
+  async function destroy({ keep }) {
+    for (const peer of [...list].reverse()) await peer.stop({ keep: true })
+    for (const tracer of Object.values(tracers)) tracer.close()
+    await testnet.destroy()
+    const test = currentTest()
+    const wanted =
+      keep || test.failed || process.env.LOCKWRIGHT_NET_KEEP === '1'
+    let timeline = null
+    if (wanted) {
+      timeline = writeTimeline({
+        name: test.name,
+        files: Object.values(tracers).map((t) => t.file),
+        failure: test.failed ? { messages: test.messages } : null
+      })
+      // eslint-disable-next-line no-console
+      console.log(`timeline: ${timeline.txt}`)
+    }
+    if (!keep) removeDir(dir)
+    try {
+      const errors = list.flatMap((peer) => peer.errors)
+      if (errors.length) {
+        throw new AggregateError(errors, `teardown: ${errors.length} error(s)`)
+      }
+      const breaches = guard.violations()
+      guard.reset()
+      if (breaches.length) {
+        throw new Error(
+          `guard: ${breaches.length} breach(es) during the test: ${breaches
+            .map((b) => b.message)
+            .join('; ')}`
+        )
+      }
+    } catch (error) {
+      if (!timeline) {
+        timeline = writeTimeline({
+          name: test.name,
+          files: Object.values(tracers).map((t) => t.file),
+          failure: { messages: [error.message] }
+        })
+        // eslint-disable-next-line no-console
+        console.log(`timeline: ${timeline.txt}`)
+      }
+      throw error
+    }
+    return { timeline }
   }
 }
 

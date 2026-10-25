@@ -13,6 +13,7 @@ export class Peer {
    *   bootstrap: Array<{ host: string, port: number }>,
    *   relayThrough?: Array<Buffer> | Function | null,
    *   dir: string,
+   *   tracer?: import('./tracer.js').Tracer | null,
    *   onCreate?: (label: string, instance: object, peer: Peer) => void,
    *   onUpdate?: (peer: Peer) => void
    * }} options
@@ -23,6 +24,7 @@ export class Peer {
     bootstrap,
     relayThrough = [],
     dir,
+    tracer = null,
     onCreate,
     onUpdate
   }) {
@@ -33,6 +35,7 @@ export class Peer {
     this.bootstrap = bootstrap
     this.relayThrough = relayThrough
     this.dir = dir
+    this.tracer = tracer
     this.onCreate = onCreate
     this.onUpdate = onUpdate
     this.deviceId = `device-${id}`
@@ -45,6 +48,9 @@ export class Peer {
     this.encryptionKey = null
     this.updates = 0
     this.errors = []
+    this.started = false
+    /** Every instance the seam handed out, so a failed init still closes. */
+    this.created = []
   }
 
   async start() {
@@ -53,8 +59,20 @@ export class Peer {
     this.network.setNetworkOverrides({
       bootstrap: this.bootstrap,
       relayThrough: this.relayThrough,
-      onCreate: (label, instance) => this.onCreate?.(label, instance, this)
+      onCreate: (label, instance) => {
+        this.created.push({ label, instance })
+        // appDeps builds the master vault and the active vault alike; the
+        // master vault is the only one built while start() runs.
+        const traced =
+          label === 'autopass' ? (this.started ? 'vault' : 'master') : label
+        this.tracer?.attach(traced, instance)
+        this.onCreate?.(label, instance, this)
+      }
     })
+    this.appDeps.setEpochStatusListener((status) =>
+      this.tracer?.epochStatus(status)
+    )
+    this.trace('peer.start', { dir: this.dir })
     await this.appDeps.masterVaultInit({
       encryptionKey: this.masterKey,
       hashedPassword: this.hashedPassword
@@ -66,7 +84,12 @@ export class Peer {
     })
     const keyPair = await this.appDeps.getPersonalKeyPair()
     this.masterTopic = Buffer.from(keyPair.publicKey).toString('hex')
+    this.started = true
     return this
+  }
+
+  trace(event, fields) {
+    return this.tracer?.record(event, fields) ?? null
   }
 
   /** The device row lib-vault's addDevice writes after create or pair. */
@@ -88,6 +111,7 @@ export class Peer {
       vaultId: this.vaultId,
       onUpdate: () => {
         this.updates++
+        this.trace('vault.update', { n: this.updates })
         this.onUpdate?.(this)
       }
     })
@@ -97,6 +121,7 @@ export class Peer {
   async createVault({ id = `vault-${this.id}`, name = id } = {}) {
     this.vaultId = id
     this.encryptionKey = crypto.randomBytes(32).toString('base64')
+    this.trace('peer.createVault', { vaultId: id })
     await this.appDeps.initActiveVaultInstance({
       id,
       encryptionKey: this.encryptionKey
@@ -109,13 +134,24 @@ export class Peer {
   }
 
   /** `<vaultId>/<z32 invite>` */
-  invite() {
-    return this.appDeps.createInvite()
+  async invite() {
+    const code = await this.appDeps.createInvite()
+    this.trace('peer.invite', { vaultId: this.vaultId })
+    return code
   }
 
   /** pairActiveVault, as lib-vault does it: pair, open, catalog, device row. */
   async pair(code) {
-    const { vaultId, encryptionKey } = await this.appDeps.pairActiveVault(code)
+    this.trace('peer.pair', { vaultId: code.split('/')[0] })
+    let paired
+    try {
+      paired = await this.appDeps.pairActiveVault(code)
+    } catch (error) {
+      this.tracer?.error('peer.pair', error)
+      throw error
+    }
+    const { vaultId, encryptionKey } = paired
+    this.trace('peer.paired', { vaultId })
     this.vaultId = vaultId
     this.encryptionKey = encryptionKey
     await this.appDeps.initActiveVaultInstance({ id: vaultId, encryptionKey })
@@ -136,6 +172,11 @@ export class Peer {
     return this.appDeps.activeVaultGet(key)
   }
 
+  /** The stored row as Autopass holds it: `{ value, file }` or null. */
+  raw(key) {
+    return this.instance.get(key)
+  }
+
   getFile(key) {
     return this.appDeps.activeVaultGetFile(key)
   }
@@ -144,8 +185,10 @@ export class Peer {
     return this.appDeps.vaultRemove(key)
   }
 
-  list(prefix) {
-    return this.appDeps.activeVaultList(prefix)
+  async list(prefix) {
+    const rows = await this.appDeps.activeVaultList(prefix)
+    this.trace('peer.list', { prefix, n: rows.length })
+    return rows
   }
 
   devices() {
@@ -157,6 +200,7 @@ export class Peer {
    * revoke every swept writer, drop the rows (primary last), rotate.
    */
   async kick(deviceId) {
+    this.trace('peer.kick', { deviceId })
     const devices = (await this.devices()) ?? []
     const target = devices.find((d) => d?.id === deviceId)
     if (!target) throw new Error(`kick: no device row ${deviceId}`)
@@ -202,23 +246,28 @@ export class Peer {
 
   /** Cut the active vault off the network; writes keep landing locally. */
   async goOffline() {
+    this.trace('peer.offline')
     await this.instance.swarm.suspend()
   }
 
   async goOnline() {
+    this.trace('peer.online')
     await this.instance.swarm.resume()
   }
 
   /** Close the active vault and open it again from disk, with a new swarm. */
   restartVault() {
+    this.trace('peer.restartVault')
     return this.appDeps.restartActiveVault()
   }
 
   closeVault() {
+    this.trace('peer.closeVault')
     return this.appDeps.closeActiveVaultInstance()
   }
 
   async openVault() {
+    this.trace('peer.openVault')
     await this.appDeps.initActiveVaultInstance({
       id: this.vaultId,
       encryptionKey: this.encryptionKey
@@ -227,6 +276,7 @@ export class Peer {
   }
 
   async stop({ keep = false } = {}) {
+    this.trace('peer.stop')
     const steps = [
       () => this.appDeps.closeAllInstances(),
       () => this.modules.personalSwarm?.personalSwarmClose(),
@@ -236,10 +286,30 @@ export class Peer {
       try {
         await step()
       } catch (error) {
+        this.tracer?.error('peer.stop', error)
         this.errors.push(error)
       }
     }
+    // An init that threw after building its Autopass leaves it outside
+    // appDeps' bookkeeping; close whatever is still open.
+    for (const { instance } of this.created.reverse()) {
+      try {
+        if (typeof instance.close === 'function' && !instance.closed) {
+          await instance.close()
+        } else if (
+          typeof instance.destroy === 'function' &&
+          !instance.destroyed
+        ) {
+          await instance.destroy()
+        }
+      } catch (error) {
+        this.errors.push(error)
+      }
+    }
+    this.created = []
+    this.appDeps.setEpochStatusListener(null)
     this.network.setNetworkOverrides(null)
+    this.tracer?.close()
     if (!keep) fs.rmSync(this.dir, { recursive: true, force: true })
   }
 }

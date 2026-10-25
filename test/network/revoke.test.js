@@ -60,6 +60,12 @@ describe('device revoke over a local testnet (ADR 0014)', () => {
       { label: 'C learns it was revoked' }
     )
     expect(status).toMatchObject({ epoch: kicked.id, canRead: false })
+    // C holds the row itself, so the null read below is a key it lacks, not
+    // a block it has not synced.
+    const stored = await waitFor(() => C.raw('note/after'), {
+      label: 'C holds the sealed row'
+    })
+    expect(stored.value).not.toContain('members only')
     expect(await C.get('note/after')).toBeNull()
     expect(await C.get('note/before')).toMatchObject({ text: 'everyone' })
 

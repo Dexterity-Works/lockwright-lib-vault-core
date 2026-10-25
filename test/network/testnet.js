@@ -1,4 +1,3 @@
-import BlindRelay from 'blind-relay'
 import HyperDHT from 'hyperdht'
 import createTestnet from 'hyperdht/testnet'
 
@@ -24,6 +23,9 @@ export const startTestnet = async ({
  * @returns {Promise<{ publicKey: Buffer, addresses: Set<string>, dht: object, destroy: () => Promise<void> }>}
  */
 export const startRelay = async (testnet) => {
+  // hyperdht's own dependency, not declared here: loaded only by the tests
+  // that run a relay, and resolved the way hyperdht resolves it.
+  const { default: BlindRelay } = await import('blind-relay')
   const dht = testnet.createNode({ ephemeral: false, firewalled: false })
   await dht.fullyBootstrapped()
   const keyPair = HyperDHT.keyPair()

@@ -5,3 +5,6 @@ node_modules
 dist
 
 app.cjs
+
+# network harness timelines of failed runs
+test-artifacts

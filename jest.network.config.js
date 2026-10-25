@@ -5,6 +5,7 @@ import base from './jest.config.js'
 // `pnpm test:network`.
 export default {
   ...base,
+  testEnvironment: '<rootDir>/test/network/jest.environment.cjs',
   testMatch: ['<rootDir>/test/network/**/*.test.js'],
   testPathIgnorePatterns: ['/node_modules/'],
   setupFiles: [...base.setupFiles, '<rootDir>/test/network/jest.guard.cjs'],

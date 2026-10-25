@@ -142,6 +142,8 @@ await swarm.dht.fullyBootstrapped()                            // dht-rpc/index.
 
 Docker: `createTestnet(n, { host: '10.0.0.5' })` binds `0.0.0.0` and advertises `10.0.0.5` (`testnet.js:10`, `:24`); peers in other containers use that `bootstrap` array.
 
+Size matters: two Hyperswarms on a testnet of one node never connect (measured: 15 s timeout with 1 node or a lone `new HyperDHT({ bootstrap: [], ephemeral: false, firewalled: false })`; 30 ms with 2 or 3 nodes, same code). A single DHT node cannot broker the handshake between two peers, so every bootstrap, in-process or in a container, runs at least two nodes. Peers only need the first node's address; the rest are in its routing table.
+
 (b) Local blind relay and a client that uses it
 
 ```js
