@@ -2007,6 +2007,58 @@ describe('epochStore over real Autopass', () => {
     expect(await keys({})).toEqual(['record/1', 'record/3', 'record/5'])
   })
 
+  it('never seals to a kicked device when the view moves during a refresh', async () => {
+    const [A, B, C] = await setup()
+    await A.store.ensureEpoch({ start: true })
+    await indexed(A, B, C)
+    await A.instance.removeWriter(C.instance.writerKey)
+    await A.store.remove('device/C')
+    await A.store.ensureEpoch({ start: true })
+    await A.store.add('record/during', 'secret')
+
+    // B reads its roster before the kick lands and the epoch rows after it.
+    const { system } = B.instance.base
+    const get = system.get.bind(system)
+    let torn = true
+    system.get = async (...args) => {
+      const out = await get(...args)
+      if (torn) {
+        torn = false
+        await sync(A, B)
+      }
+      return out
+    }
+    const result = await B.store.ensureEpoch({ start: false })
+    system.get = get
+    await sync(A, B, C)
+
+    expect(result.members ?? []).not.toContain('C')
+    expect((await B.store.status()).members).not.toContain('C')
+    expect(await C.store.get('record/during')).toBeNull()
+  })
+
+  it('refuses a write but still reads while the view never holds still', async () => {
+    const [A] = await setup(['A'])
+    await A.store.ensureEpoch({ start: true })
+    await A.store.add('record/r', 'v')
+    const { system } = A.instance.base
+    const get = system.get.bind(system)
+    system.get = async (...args) => {
+      A.instance.emit('update')
+      return get(...args)
+    }
+
+    expect(await value(A, 'record/r')).toBe('v')
+    await expect(A.store.add('record/s', 'w')).rejects.toThrow(
+      'the vault view kept moving'
+    )
+    expect(await A.instance.get('record/s')).toBeNull()
+
+    system.get = get
+    await A.store.add('record/s', 'w')
+    expect(await value(A, 'record/s')).toBe('w')
+  })
+
   it('refreshes once to read a row whose key landed after the read began', async () => {
     const [A, B] = await setup(['A', 'B'])
     await A.store.ensureEpoch({ start: true })

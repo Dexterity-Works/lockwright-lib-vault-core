@@ -106,6 +106,8 @@ export const createEpochStore = ({
   let updates = 0
   let refreshedAt = -1
   let refreshing = Promise.resolve()
+  // Whether the last refresh read its roster and epoch rows from one view.
+  let viewSettled = true
   let ensuring = null
   /** @type {{ start: boolean, promise: Promise<object> } | null} */
   let queued = null
@@ -235,10 +237,20 @@ export const createEpochStore = ({
   }
 
   const doRefresh = async () => {
-    const startedAt = updates
     const keyPair = await getPersonalKeyPair()
-    const nextRoster = await readRoster()
-    const records = await readPrefix('epoch/')
+    // The roster and the epoch rows must come from one view: a kick applied
+    // between the two reads would pair a roster that still binds the kicked
+    // device with an epoch that already left it out, and a rotation from
+    // that sealed every key to it. Reads can use a view that kept moving;
+    // writes and rotations cannot (see settle).
+    let startedAt, nextRoster, records
+    for (let attempt = 1; ; attempt++) {
+      startedAt = updates
+      nextRoster = await readRoster()
+      records = await readPrefix('epoch/')
+      viewSettled = updates === startedAt
+      if (viewSettled || attempt === 5) break
+    }
     const next = resolveEpochs(records, bound(nextRoster), {
       verify: verifyOnce
     })
@@ -307,7 +319,7 @@ export const createEpochStore = ({
     roster = nextRoster
     epochs = next
     legacy = !epochSeen
-    refreshedAt = startedAt
+    refreshedAt = viewSettled ? startedAt : -1
   }
 
   // A failed refresh leaves the store stale, so the next read tries again
@@ -325,6 +337,12 @@ export const createEpochStore = ({
   const refresh = () => {
     refreshing = refreshing.then(tryRefresh, tryRefresh)
     return refreshing
+  }
+
+  // A refresh a write or a rotation can act on.
+  const settle = async () => {
+    await refresh()
+    if (!viewSettled) throw new Error('epochStore: the vault view kept moving')
   }
 
   // Already fresh: another caller's refresh failing does not make this
@@ -411,7 +429,7 @@ export const createEpochStore = ({
     refuseEpochKey(key)
     // Always re-resolve before a write: a stale epoch would leak the value
     // to a device that was just removed.
-    await refresh()
+    await settle()
     if (isPlaintextKey(key) || legacy) {
       return instance.add(key, signRow(key, value), file)
     }
@@ -660,8 +678,8 @@ export const createEpochStore = ({
   }
 
   const doEnsureEpoch = async ({ start = false } = {}, retried = false) => {
-    await refresh()
-    if (await resignMyRows()) await refresh()
+    await settle()
+    if (await resignMyRows()) await settle()
     const keyPair = await getPersonalKeyPair()
     const { sealable, uncovered } = coverage()
     const skip = (reason) => ({ rotated: false, reason, uncovered })
