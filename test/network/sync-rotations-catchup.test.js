@@ -4,6 +4,7 @@ import {
   converge,
   createNetwork,
   holdsEpoch,
+  sealedFrom,
   shareVault,
   waitFor
 } from './harness.js'
@@ -14,6 +15,20 @@ const fileFor = (key) => {
   const seed = crypto.createHash('sha256').update(key).digest()
   return Buffer.concat(Array.from({ length: 256 }, () => seed))
 }
+
+// The epoch a stored row was sealed under, from its envelope (keyring.js).
+const sealedUnder = async (peer, key) =>
+  JSON.parse((await peer.raw(key)).value).e
+
+// Every `epoch/` row as Autopass holds it, parsed: `{ id, seq, members }`.
+const epochRows = async (peer) => {
+  const rows = []
+  for await (const { key, value } of peer.instance.list()) {
+    if (key.startsWith('epoch/')) rows.push(JSON.parse(value))
+  }
+  return rows
+}
+const memberIds = (row) => Object.keys(row.members).sort()
 
 describe('a member offline across epoch rotations (ADR 0014)', () => {
   let net = null
@@ -45,6 +60,7 @@ describe('a member offline across epoch rotations (ADR 0014)', () => {
 
     await A.add('note/e0', { epoch: first.id, n: 0 })
     expect(await converge(net.list, 'note/e0')).toMatchObject({ n: 0 })
+    expect(await sealedUnder(A, 'note/e0')).toBe(first.id)
 
     await C.goOffline()
     expect(C.instance.swarm.suspended).toBe(true)
@@ -81,9 +97,11 @@ describe('a member offline across epoch rotations (ADR 0014)', () => {
       const key = `note/e${n + 1}`
       const value = { epoch: settled.epoch, n: n + 1 }
       await A.add(key, value, fileFor(key), `${key}.bin`)
+      // Sealed under the epoch that left the kicked device out, not under
+      // one C could read without catching up.
+      expect(await sealedUnder(A, key)).toBe(settled.epoch)
       written.push({ key, value })
     }
-    expect(new Set(epochs).size).toBe(4)
     // A is the last writer standing, so once its ensureEpoch owes nothing
     // the chain is settled: a record B sealed before its kick that reaches
     // A late makes A rotate one more time (holdsMoreThan).
@@ -101,11 +119,17 @@ describe('a member offline across epoch rotations (ADR 0014)', () => {
       canRead: true,
       members: ['device-A', 'device-C']
     })
-    // Every epoch record A wrote or received while C was away; at least
-    // the three kicks' worth, more when a same-seq race added one.
-    const missed = (await A.list('epoch/')).filter((e) => e.id !== first.id)
-    expect(missed.length).toBeGreaterThanOrEqual(3)
-    expect(missed.map((e) => e.id)).toContain(latest)
+    // Every epoch record A wrote or received while C was away: each kick's
+    // settled epoch and the latest, more when a same-seq race added one.
+    // All of them left D out and carry a box for C.
+    const missed = (await epochRows(A)).filter((e) => e.id !== first.id)
+    expect(missed.map((e) => e.id)).toEqual(
+      expect.arrayContaining([...epochs.slice(1), latest])
+    )
+    for (const row of missed) {
+      expect(memberIds(row)).toContain('device-C')
+      expect(memberIds(row)).not.toContain('device-D')
+    }
     // C has not heard of any of it.
     expect((await C.epochStatus()).epoch).toBe(first.id)
 
@@ -141,10 +165,22 @@ describe('a member offline across epoch rotations (ADR 0014)', () => {
       })
       expect(Buffer.from(bytes).equals(fileFor(key))).toBe(true)
     }
-    await C.add('note/from-c', { epoch: latest })
+    const fromC = { epoch: latest, text: 'written by C after its return' }
+    await C.add('note/from-c', fromC)
     expect(
       await waitFor(() => A.get('note/from-c'), { label: 'A reads from C' })
-    ).toEqual({ epoch: latest })
+    ).toEqual(fromC)
+    // Any rotation since C left was sealed to A and C alone, on both sides;
+    // the kicked devices still online hold C's write and cannot read it.
+    for (const peer of [A, C]) {
+      const above = (await epochRows(peer)).filter((e) => e.seq > before.seq)
+      for (const row of above) {
+        expect(memberIds(row)).toEqual(['device-A', 'device-C'])
+      }
+    }
+    for (const id of ['B', 'D', 'E']) {
+      await sealedFrom(net.peers[id], 'note/from-c', fromC.text)
+    }
 
     // Trace: offline before online; after online the statuses end at the
     // epoch C and A settled on; canRead never dropped once C was a member.
