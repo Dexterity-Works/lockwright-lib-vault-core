@@ -185,9 +185,14 @@ export class Peer {
     return this.appDeps.vaultRemove(key)
   }
 
+  /** Traced only when the count under `prefix` changes: waits poll it. */
   async list(prefix) {
     const rows = await this.appDeps.activeVaultList(prefix)
-    this.trace('peer.list', { prefix, n: rows.length })
+    this.listed ??= new Map()
+    if (this.listed.get(prefix) !== rows.length) {
+      this.listed.set(prefix, rows.length)
+      this.trace('peer.list', { prefix, n: rows.length })
+    }
     return rows
   }
 
