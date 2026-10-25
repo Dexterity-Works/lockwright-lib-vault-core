@@ -232,6 +232,40 @@ export class Peer {
     return this.appDeps.activeVaultEnsureEpoch({ start: true })
   }
 
+  /** Start this device's personal swarm (its master topic) and collect envelopes. */
+  async personalInit() {
+    const ps = this.modules.personalSwarm
+    this.envelopes ??= []
+    if (!this.unsubscribeEnvelope) {
+      this.unsubscribeEnvelope = ps.personalSwarmOnEnvelope((hex) => {
+        this.envelopes.push(hex)
+        this.trace('personal.envelope', { bytes: hex.length / 2 })
+      })
+    }
+    const { topic } = await ps.personalSwarmInit()
+    this.trace('personal.init', { topic: topic.slice(0, 8) })
+    return topic
+  }
+
+  async personalClose() {
+    this.trace('personal.close')
+    await this.modules.personalSwarm.personalSwarmClose()
+  }
+
+  /** personalSwarmSend: one framed envelope to a device's master topic. */
+  async personalSend(topicHex, envelopeHex) {
+    const result = await this.modules.personalSwarm.personalSwarmSend(
+      topicHex,
+      envelopeHex
+    )
+    this.trace('personal.send', {
+      topic: String(topicHex).slice(0, 8),
+      ok: result.ok,
+      reason: result.reason ?? null
+    })
+    return result
+  }
+
   ensureEpoch({ start = false } = {}) {
     return this.appDeps.activeVaultEnsureEpoch({ start })
   }
@@ -312,6 +346,8 @@ export class Peer {
       }
     }
     this.created = []
+    this.unsubscribeEnvelope?.()
+    this.unsubscribeEnvelope = null
     this.appDeps.setEpochStatusListener(null)
     this.network.setNetworkOverrides(null)
     this.tracer?.close()
