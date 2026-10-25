@@ -40,12 +40,20 @@ describe('device revoke over a local testnet (ADR 0014)', () => {
     })
     expect(kicked.id).not.toBe(first.id)
 
-    await waitFor(
+    // Not pinned to A's epoch id: B may rotate for the same removal at the
+    // same time (seen under 200 ms latency in the lab), and both then settle
+    // on a later epoch with the same two members.
+    const members = ['device-A', 'device-B']
+    const settled = await waitFor(
       async () => {
         const status = await B.epochStatus()
-        return status.epoch === kicked.id && status.canRead
+        return status.canRead &&
+          status.epoch !== first.id &&
+          JSON.stringify(status.members) === JSON.stringify(members)
+          ? status
+          : false
       },
-      { label: `B holds epoch ${kicked.id}` }
+      { label: 'B holds the epoch without C' }
     )
     await A.add('note/after', { text: 'members only' })
     expect(await converge([A, B], 'note/after')).toMatchObject({
@@ -59,7 +67,7 @@ describe('device revoke over a local testnet (ADR 0014)', () => {
       },
       { label: 'C learns it was revoked' }
     )
-    expect(status).toMatchObject({ epoch: kicked.id, canRead: false })
+    expect(status).toMatchObject({ epoch: settled.epoch, canRead: false })
     // C holds the row itself, so the null read below is a key it lacks, not
     // a block it has not synced.
     const stored = await waitFor(() => C.raw('note/after'), {
