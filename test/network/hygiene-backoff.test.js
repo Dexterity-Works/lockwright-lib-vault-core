@@ -18,8 +18,15 @@ const bounds = (tier) => [
   Math.floor(TIMERS[tier].min * 0.66),
   Math.ceil(TIMERS[tier].max * 1.32)
 ]
-// A timer fires on a setInterval tick; allow the event loop that much.
-const TICK_SLACK = 500
+// A timer fires on a setInterval tick, and the tick runs late when the event
+// loop is busy (three DHTs, replication, jest). At the long tier's maximum
+// jitter that lag has reached past 500 ms.
+const TICK_SLACK = 1000
+// Not covered: the relay path's fast redial. When a dial fails with a
+// HOLEPUNCH_* code and the swarm has relayThrough, `onerror` in `_connect`
+// sets forceRelaying and resets `attempts` to 0 (hyperswarm/index.js
+// ~224-229), so the schedule starts over and the relayed redial comes
+// fast. Without a relay that branch never runs.
 
 const hex = (key) => Buffer.from(key).toString('hex')
 
