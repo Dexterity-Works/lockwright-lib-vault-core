@@ -304,6 +304,24 @@ export class Peer {
     return ms
   }
 
+  /**
+   * API.CLOSE_ALL_INSTANCES as appCore.js handles it: the personal swarm,
+   * then every instance, then the shared DHT, in that order.
+   */
+  async closeAll() {
+    this.trace('peer.closeAll')
+    await this.modules.personalSwarm.personalSwarmClose()
+    await this.appDeps.closeAllInstances()
+    await this.modules.dht.destroySharedDHT()
+  }
+
+  /** Forget closed instances, so a long run does not measure its own list. */
+  pruneClosed() {
+    this.created = this.created.filter(
+      ({ instance }) => !instance.closed && !instance.destroyed
+    )
+  }
+
   /** Unlock: the master vault with the same keys, then the active vault. */
   async unlock() {
     this.trace('peer.unlock')
