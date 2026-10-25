@@ -1,13 +1,17 @@
+import { encode } from 'autopass/spec/hyperdispatch'
+
 import {
   converge,
   createNetwork,
   holdsEpoch,
   holdsMembers,
   indexOf,
+  noKeyAfter,
   pairOrCancel,
   revokedStatus,
+  sameList,
   sealedFrom,
-  settledEpoch,
+  settledUnaided,
   shareVault,
   statusPushed,
   waitFor
@@ -16,7 +20,6 @@ import { short } from './tracer.js'
 
 const AB = ['device-A', 'device-B']
 const ABC = ['device-A', 'device-B', 'device-C']
-const sameList = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 
 const members = async (peer) => (await peer.epochStatus()).members
 
@@ -33,11 +36,11 @@ const readableLater = (events, first) =>
       e.canRead
   )
 
-/** How many blocks `peer` holds of the writer core `writerKey` (hex). */
+/** How many blocks `peer` holds, from the start, of the writer core `writerKey` (hex). */
 const writerLength = async (peer, writerKey) => {
   const core = peer.instance.store.get({ key: Buffer.from(writerKey, 'hex') })
   await core.ready()
-  const { length } = core
+  const length = core.contiguousLength
   await core.close()
   return length
 }
@@ -102,7 +105,7 @@ describe('a kicked device returns under the same identity (ADR 0014)', () => {
 
     // A, B and C may each rotate for C's row; the loser of a same-seq race
     // rotates once more to carry its key.
-    const readmitted = await settledEpoch([A, B, C], ABC)
+    const readmitted = await settledUnaided(net, [A, B, C], ABC)
     expect(readmitted.epoch).not.toBe(out.epoch)
     expect(await rows(A)).toEqual(ABC)
 
@@ -144,36 +147,40 @@ describe('a kicked device returns under the same identity (ADR 0014)', () => {
     expect(readableLater(events.slice(0, repaired), first)).toEqual([])
   })
 
-  // Finding R1. A kicked C that kept its local copy cannot pair again on
-  // it. Autopass's joiner (AutopassPairer onadd) opens the vault on C's
-  // existing store, where C's old writer core is the one A adds back. Then
-  // either its deleteInvite appends while C's view still has C removed and
-  // throws "Not writable" on the pairing connection, or the base is already
-  // writable and _whenWritable returns without resolving. pair() hangs until
-  // lib-vault's timeout, and the Autopass onadd built stays open. Kept as
-  // failing until the pairing path handles a store it was a writer on.
-  test.failing(
-    'C that kept its copy pairs again on the same store',
-    async () => {
-      net = await createNetwork({ peers: ['A', 'B', 'C'] })
-      const { A, C } = net.peers
-      await shareVault(net)
-      const { first } = await kickC()
+  // Finding R1, a vault-core API hazard that lib-vault does not reach: on
+  // vault-access-revoked the app wipes the vault (removeVault), and
+  // lib-vault's pairActiveVault refuses while the vault's catalog row
+  // exists. pearpassPairer.pairInstance opens vault/<id> without checking
+  // that it is empty, so a caller that pairs on a kicked device's old store
+  // gets Autopass's joiner (AutopassPairer onadd) on C's existing store,
+  // where C's old writer core is the one A adds back. Either its
+  // deleteInvite appends while C's view still has C removed and throws "Not
+  // writable" on the pairing connection, or the base is already writable
+  // and _whenWritable returns without resolving. Either way pair() never
+  // resolves; the timeout's cancel rejects it. This pins that outcome.
+  test('R1: C that kept its copy cannot pair again on the same store', async () => {
+    net = await createNetwork({ peers: ['A', 'B', 'C'] })
+    const { A, B, C } = net.peers
+    await shareVault(net)
+    await kickC()
 
-      let result
-      try {
-        result = await pairOrCancel(C, await A.invite(), { timeout: 20000 })
-      } finally {
-        // The pairer's close leaves the Autopass its onadd built open when
-        // the pairing did not resolve; it keeps the process alive at full
-        // CPU. Part of the finding.
-        const pairer = C.created.findLast((c) => c.label === 'pairer')
-        await pairer?.instance.pass?.close()
-      }
-      expect(result).toMatchObject({ paired: true })
-      await holdsMembers(A, ABC, { besides: first.id })
+    let result
+    try {
+      result = await pairOrCancel(C, await A.invite(), { timeout: 20000 })
+    } finally {
+      // The pairer's close leaves the Autopass its onadd built open (R2);
+      // it keeps the process alive at full CPU.
+      const pairer = C.created.findLast((c) => c.label === 'pairer')
+      await pairer?.instance.pass?.close()
     }
-  )
+    expect(result).toMatchObject({ paired: false })
+    expect(result.error.message).toMatch(/^Pairing failed: .*Pairing closed$/)
+    expect(
+      net.tracers.C.events.some((e) => e.event === 'peer.pairTimeout')
+    ).toBe(true)
+    expect(await rows(A)).toEqual(AB)
+    expect(await members(B)).toEqual(AB)
+  })
 
   // ADR 0014: "`removeWriter` stays". A kicked device that keeps the vault
   // key and the encryption key and reopens the vault under the same
@@ -186,11 +193,12 @@ describe('a kicked device returns under the same identity (ADR 0014)', () => {
     const { first } = await kickC()
 
     await C.restartVault()
-    // Straight after the reopen Autobase may report C writable until it
-    // applies C's own removal again: try a raw append in that window.
-    const early = await C.instance.add('note/from-c-early', 'plain').then(
-      () => 'appended',
-      (error) => error.message
+    await C.instance.base.update()
+    // Autobase keeps the applied view on disk, so the reopened base starts
+    // with C's own removal applied: no window in which a plain append goes
+    // through (10 of 10 runs). Asserted, not assumed.
+    await expect(C.instance.add('note/from-c-early', 'plain')).rejects.toThrow(
+      'Not writable'
     )
     expect(
       await revokedStatus(
@@ -205,6 +213,7 @@ describe('a kicked device returns under the same identity (ADR 0014)', () => {
     await sealedFrom(C, 'note/hostile-after', 'members only')
     expect(await C.get('note/while-out')).toBeNull()
     expect(await C.get('note/before')).toMatchObject({ text: 'everyone' })
+    await noKeyAfter(C, { lastHeldSeq: first.seq })
 
     // Through the store: no key for the latest epoch, nothing is appended.
     await expect(C.add('note/from-c', { text: 'sneaky' })).rejects.toThrow(
@@ -217,24 +226,41 @@ describe('a kicked device returns under the same identity (ADR 0014)', () => {
     await expect(C.instance.add('note/from-c-raw', 'plain')).rejects.toThrow(
       'Not writable'
     )
-    expect(await C.raw('note/from-c')).toBeNull()
-    expect(await C.raw('note/from-c-raw')).toBeNull()
-
-    // C cannot write a marker of its own, so the proof that nothing of C's
-    // was held back is its writer core: once A and B hold every block C
-    // appended, early append included, the view still has none of it.
+    // Past the writable check: Autobase takes an optimistic append from a
+    // non-writer and applies it only if apply acks the writer, which
+    // Autopass never does. The block does land on C's writer core, so the
+    // proof below is about a block A and B really hold.
     const length = C.instance.base.local.length
+    await C.instance.base.append(
+      encode('@autopass/put', {
+        key: 'note/from-c-optimistic',
+        value: 'plain'
+      }),
+      { optimistic: true }
+    )
+    expect(C.instance.base.local.length).toBe(length + 1)
+    await C.instance.base.update()
+    for (const key of ['note/from-c', 'note/from-c-raw', 'note/from-c-early']) {
+      expect(await C.raw(key)).toBeNull()
+    }
+
+    // Once A and B hold every block of C's writer, the optimistic one
+    // included, their views still have none of it.
     for (const peer of [A, B]) {
       await waitFor(
-        async () => (await writerLength(peer, C.writerKey)) >= length,
-        { label: `${peer.id} holds all ${length} blocks of C's writer` }
+        async () => (await writerLength(peer, C.writerKey)) >= length + 1,
+        { label: `${peer.id} holds all ${length + 1} blocks of C's writer` }
       )
-      expect(await peer.raw('note/from-c')).toBeNull()
-      expect(await peer.raw('note/from-c-raw')).toBeNull()
-      expect(await peer.raw('note/from-c-early')).toBeNull()
+      await peer.instance.base.update()
+      for (const key of [
+        'note/from-c',
+        'note/from-c-raw',
+        'note/from-c-early',
+        'note/from-c-optimistic'
+      ]) {
+        expect(await peer.raw(key)).toBeNull()
+      }
     }
-    // eslint-disable-next-line no-console
-    console.log(`C's raw append right after the reopen: ${early}`)
     expect(await rows(A)).toEqual(AB)
     expect(await members(A)).toEqual(AB)
 
