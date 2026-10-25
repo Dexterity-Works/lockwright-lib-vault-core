@@ -453,9 +453,14 @@ export const createEpochStore = ({
     await settle()
     // An owed start is a kick or leave whose first rotation failed: the
     // removed device must not read this write in plaintext.
-    if (legacy && !isPlaintextKey(key) && (await readStartOwed()) === true) {
-      await ensureEpoch({ start: true })
-      if (legacy) throw new EpochRotationPendingError()
+    if (legacy && !isPlaintextKey(key)) {
+      const owed = await readStartOwed()
+      // Unread: nobody knows whether a removal is waiting on the start.
+      if (owed === OWED_UNREAD) throw new EpochRotationPendingError()
+      if (owed === true) {
+        await ensureEpoch({ start: true })
+        if (legacy) throw new EpochRotationPendingError()
+      }
     }
     if (isPlaintextKey(key) || legacy) {
       return instance.add(key, signRow(key, value), file)

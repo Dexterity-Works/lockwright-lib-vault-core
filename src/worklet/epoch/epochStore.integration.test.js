@@ -2138,6 +2138,25 @@ describe('epochStore over real Autopass', () => {
     expect(await C.store.get('record/during')).toBeNull()
   })
 
+  it('refuses a plaintext write while the owed start cannot be read', async () => {
+    const [A] = await setup(['A'])
+    const { local } = A.instance.base
+    const getUserData = local.getUserData.bind(local)
+    local.getUserData = async (key) => {
+      if (key === 'lockwright/epoch-start-owed') throw new Error('disk busy')
+      return getUserData(key)
+    }
+
+    await expect(A.store.add('record/r', 'v')).rejects.toBeInstanceOf(
+      EpochRotationPendingError
+    )
+    expect(await A.instance.get('record/r')).toBeNull()
+
+    local.getUserData = getUserData
+    await A.store.add('record/r', 'v')
+    expect((await A.instance.get('record/r')).value).toBe('v')
+  })
+
   it('refuses a write but still reads while the view never holds still', async () => {
     const [A] = await setup(['A'])
     await A.store.ensureEpoch({ start: true })
