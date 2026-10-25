@@ -1463,6 +1463,10 @@ export const vaultRemoveWriter = async (writerKey) => {
     throw new Error('writerKey is required')
   }
 
+  // Owed before the removal lands: a lock between it and the kick's
+  // ensureEpoch({ start: true }) must not leave the vault legacy.
+  await epochStore?.oweStart()
+
   // autopass.removeWriter passes the key straight to b4a.from(), which
   // defaults to UTF-8 for strings. We store/transport writerKey as hex,
   // so decode here to the raw 32-byte ed25519 public key autobase needs.

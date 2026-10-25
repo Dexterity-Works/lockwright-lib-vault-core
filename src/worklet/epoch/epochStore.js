@@ -116,6 +116,8 @@ export const createEpochStore = ({
   let startOwed = null
   // Owed here but not yet written: the next run writes it again.
   let unsavedOwed = false
+  // Bumped by oweStart(), so a run that began before it does not clear it.
+  let owedMarks = 0
 
   instance.on('update', () => {
     updates++
@@ -730,6 +732,7 @@ export const createEpochStore = ({
 
   const runEnsure = (start) => {
     const run = (async () => {
+      const marks = owedMarks
       const stored = start || (await readStartOwed())
       const owed = stored === true
       let result
@@ -744,7 +747,9 @@ export const createEpochStore = ({
         result.reason === 'current' ||
         result.reason === 'pending'
       // A run that could not read the flag must not overwrite it.
-      if (stored !== OWED_UNREAD) await writeStartOwed(settled ? false : owed)
+      if (stored !== OWED_UNREAD && marks === owedMarks) {
+        await writeStartOwed(settled ? false : owed)
+      }
       return result
     })().finally(() => {
       if (ensuring === run) ensuring = null
@@ -773,6 +778,16 @@ export const createEpochStore = ({
       })
     queued = next
     return next.promise
+  }
+
+  /**
+   * A kick owes a start before its first roster write: a close between
+   * that write and its ensureEpoch({ start: true }) leaves the start to the
+   * next run (unlock, an update), not to a legacy vault that skips.
+   */
+  const oweStart = async () => {
+    owedMarks++
+    await writeStartOwed(true)
   }
 
   // My row is the one with my masterTopic, or with my writer key when it
@@ -829,5 +844,5 @@ export const createEpochStore = ({
       })
     })
 
-  return { add, get, find, remove, refresh, ensureEpoch, status }
+  return { add, get, find, remove, refresh, ensureEpoch, oweStart, status }
 }
