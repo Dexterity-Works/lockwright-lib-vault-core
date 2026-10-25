@@ -37,8 +37,12 @@ export const startRelay = async (testnet) => {
   const server = new BlindRelay.Server({
     createStream: (opts) => dht.createRawStream(opts)
   })
+  // A relayed stream that resets errors its session; unhandled, that
+  // throws out of the test process.
   const listener = dht.createServer((socket) => {
-    server.accept(socket, { id: socket.remotePublicKey })
+    socket.on('error', () => {})
+    const session = server.accept(socket, { id: socket.remotePublicKey })
+    session.on('error', () => {})
   })
   await listener.listen(keyPair)
   guard.allowRelay(keyPair.publicKey)
