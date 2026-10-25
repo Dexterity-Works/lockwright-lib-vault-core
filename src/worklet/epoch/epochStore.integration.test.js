@@ -15,6 +15,7 @@ import {
   EpochRotationPendingError,
   encryptValue,
   generateEpochKey,
+  isEnvelope,
   openRing,
   sealCheck,
   sealRing,
@@ -2142,6 +2143,53 @@ describe('epochStore over real Autopass', () => {
       rotated: true,
       seq: 1
     })
+  })
+
+  it('keeps a start a kick owed while an earlier run was in flight', async () => {
+    const [A] = await setup(['A'])
+    let gate = null
+    let reached
+    const atGate = new Promise((resolve) => {
+      reached = resolve
+    })
+    const store = createEpochStore({
+      instance: A.instance,
+      getPersonalKeyPair: async () => {
+        if (gate) {
+          reached()
+          await gate
+        }
+        return A.keyPair
+      }
+    })
+    await store.status()
+    let release
+    gate = new Promise((resolve) => {
+      release = resolve
+    })
+    const run = store.ensureEpoch()
+    await atGate
+    await store.oweStart()
+    release()
+    expect(await run).toMatchObject({ rotated: false, reason: 'legacy' })
+
+    const restarted = createEpochStore({
+      instance: A.instance,
+      getPersonalKeyPair: async () => A.keyPair
+    })
+    expect(await restarted.ensureEpoch()).toMatchObject({
+      rotated: true,
+      seq: 1
+    })
+  })
+
+  it('seals the first write on a legacy vault once a kick owed the start', async () => {
+    const [A] = await setup(['A'])
+    await A.store.oweStart()
+    await A.store.add('record/s', 'secret')
+
+    expect(isEnvelope((await A.instance.get('record/s')).value)).toBe(true)
+    expect(await value(A, 'record/s')).toBe('secret')
   })
 
   it('refuses a write it cannot rotate for while the epoch lists a removed device', async () => {

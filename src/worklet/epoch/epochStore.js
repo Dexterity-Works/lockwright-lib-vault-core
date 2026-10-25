@@ -403,6 +403,21 @@ export const createEpochStore = ({
     })
   }
 
+  // Only a writer in the roster can rotate; anyone else leaves it as is.
+  const startIfAble = async () => {
+    const keyPair = await getPersonalKeyPair()
+    const canRotate =
+      instance.base.writable &&
+      coverage().sealable.some((row) => isMe(row.masterTopic, keyPair))
+    if (!canRotate) return
+    try {
+      await ensureEpoch({ start: true })
+    } catch (error) {
+      // Whoever won may have left latest current: judge it below.
+      if (!(error instanceof RotationOvertakenError)) throw error
+    }
+  }
+
   /**
    * Values under `vault`, `vault-ext`, `device/` and `epoch/` stay
    * plaintext; anything else is sealed under the latest epoch once one
@@ -414,23 +429,16 @@ export const createEpochStore = ({
     // Always re-resolve before a write: a stale epoch would leak the value
     // to a device that was just removed.
     await refresh()
-    if (isPlaintextKey(key) || legacy) {
+    if (isPlaintextKey(key)) {
       return instance.add(key, signRow(key, value), file)
     }
+    // A kick owed the first epoch (oweStart) and a lock cut it short: start
+    // it now, or this value goes out in plaintext to the kicked device.
+    if (legacy && (await readStartOwed()) === true) await startIfAble()
+    if (legacy) return instance.add(key, signRow(key, value), file)
 
     if (isStale()) {
-      const keyPair = await getPersonalKeyPair()
-      const canRotate =
-        instance.base.writable &&
-        coverage().sealable.some((row) => isMe(row.masterTopic, keyPair))
-      if (canRotate) {
-        try {
-          await ensureEpoch({ start: true })
-        } catch (error) {
-          // Whoever won may have left latest current: judge it below.
-          if (!(error instanceof RotationOvertakenError)) throw error
-        }
-      }
+      await startIfAble()
       if (isStale()) throw new EpochRotationPendingError()
     }
 
@@ -783,11 +791,23 @@ export const createEpochStore = ({
   /**
    * A kick owes a start before its first roster write: a close between
    * that write and its ensureEpoch({ start: true }) leaves the start to the
-   * next run (unlock, an update), not to a legacy vault that skips.
+   * next run (unlock, an update, the next add), not to a legacy vault that
+   * skips. Throws when the flag cannot be written, so the kick stops before
+   * its removal. ADR 0014 deviation, as in lib-vault's startLegacyEpoch: the
+   * owe lands before the removal, so a removal that then fails leaves a
+   * start owed with the device still in the roster, and the next run starts
+   * an epoch that includes it.
    */
   const oweStart = async () => {
     owedMarks++
-    await writeStartOwed(true)
+    try {
+      await instance.base.local.setUserData(START_OWED, Buffer.from('1'))
+    } catch (error) {
+      startOwed = null
+      throw error
+    }
+    startOwed = true
+    unsavedOwed = false
   }
 
   // My row is the one with my masterTopic, or with my writer key when it

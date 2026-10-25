@@ -1464,7 +1464,8 @@ export const vaultRemoveWriter = async (writerKey) => {
   }
 
   // Owed before the removal lands: a lock between it and the kick's
-  // ensureEpoch({ start: true }) must not leave the vault legacy.
+  // ensureEpoch({ start: true }) must not leave the vault legacy. A flag
+  // that cannot be written throws here, before the removal.
   await epochStore?.oweStart()
 
   // autopass.removeWriter passes the key straight to b4a.from(), which
