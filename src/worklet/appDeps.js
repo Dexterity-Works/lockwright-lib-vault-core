@@ -1264,8 +1264,12 @@ export const signMessage = async (messageHex) => {
   if (!isVaultsInitialized) {
     throw new Error('Vaults not initialised')
   }
-  const { secretKey } = await getPersonalKeyPair()
   const message = b4a.from(messageHex, 'hex')
+  // Epoch records are signed with the same key under this prefix.
+  if (b4a.toString(message.subarray(0, 11)) === 'lockwright/') {
+    throw new Error('signMessage: bytes in the reserved signing domain')
+  }
+  const { secretKey } = await getPersonalKeyPair()
   const signature = b4a.alloc(sodium.crypto_sign_BYTES)
   sodium.crypto_sign_detached(signature, message, secretKey)
   return b4a.toString(signature, 'hex')

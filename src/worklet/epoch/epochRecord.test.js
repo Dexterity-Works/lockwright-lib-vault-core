@@ -1,6 +1,7 @@
 import sodium from 'sodium-native'
 
 import {
+  EPOCH_RECORD_DOMAIN,
   buildEpochRecord,
   resolveEpochs,
   verifySignature
@@ -85,11 +86,38 @@ describe('epochRecord', () => {
     expect(
       sodium.crypto_sign_verify_detached(
         Buffer.from(record.sig, 'hex'),
-        Buffer.from(canonical),
+        Buffer.from(EPOCH_RECORD_DOMAIN + canonical),
         a.publicKey
       )
     ).toBe(true)
     expect(verifySignature(record, vault)).toBe(true)
+  })
+
+  it('does not verify a signature over the bare record bytes', () => {
+    const vault = '11'.repeat(32)
+    const record = build({ vault })
+    const { v, id, seq, prev, createdAt, by } = record
+    // What a generic signer such as signMessage makes of the same bytes.
+    const bare = Buffer.from(
+      JSON.stringify({
+        vault,
+        v,
+        id,
+        seq,
+        prev,
+        createdAt,
+        by,
+        members: Object.entries(record.members),
+        check: record.check
+      })
+    )
+    const sig = Buffer.alloc(sodium.crypto_sign_BYTES)
+    sodium.crypto_sign_detached(sig, bare, a.secretKey)
+
+    expect(EPOCH_RECORD_DOMAIN.startsWith('lockwright/')).toBe(true)
+    expect(
+      verifySignature({ ...record, sig: sig.toString('hex') }, vault)
+    ).toBe(false)
   })
 
   it('fails when any canonical field changes', () => {

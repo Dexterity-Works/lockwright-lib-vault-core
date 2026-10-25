@@ -28,6 +28,13 @@ const memberPairs = (members) =>
     .sort(byCodePoint)
     .map((id) => [id, { topic: members[id].topic, box: members[id].box }])
 
+/**
+ * Domain of an epoch record signature. The personal key also signs swarm
+ * envelopes through signMessage, which refuses `lockwright/` bytes, so a
+ * signature it makes never verifies as an epoch record.
+ */
+export const EPOCH_RECORD_DOMAIN = 'lockwright/epoch-record/v1'
+
 // `vault` is not stored: a record signed for one vault never verifies in
 // another, where its author may also be a member.
 const canonicalBytes = (
@@ -35,17 +42,18 @@ const canonicalBytes = (
   vault
 ) =>
   Buffer.from(
-    JSON.stringify({
-      vault,
-      v,
-      id,
-      seq,
-      prev,
-      createdAt,
-      by,
-      members: memberPairs(members),
-      check: { n: check.n, c: check.c }
-    })
+    EPOCH_RECORD_DOMAIN +
+      JSON.stringify({
+        vault,
+        v,
+        id,
+        seq,
+        prev,
+        createdAt,
+        by,
+        members: memberPairs(members),
+        check: { n: check.n, c: check.c }
+      })
   )
 
 /**

@@ -644,6 +644,17 @@ describe('appDeps module functions (excluding encryption)', () => {
       ).toBe(false)
     })
 
+    test('signMessage refuses bytes in the reserved lockwright/ signing domain', async () => {
+      const reserved = Buffer.from('lockwright/epoch-record/v1{"vault":"x"}')
+
+      await expect(
+        appDeps.signMessage(reserved.toString('hex'))
+      ).rejects.toThrow('reserved signing domain')
+      await expect(
+        appDeps.signMessage(Buffer.from('{"type":"kick"}').toString('hex'))
+      ).resolves.toMatch(/^[0-9a-f]{128}$/)
+    })
+
     test('activeVaultGet calls get on activeVaultInstance and returns result', async () => {
       await appDeps.initActiveVaultInstance({
         id: 'vault1',
