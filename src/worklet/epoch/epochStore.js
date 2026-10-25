@@ -235,19 +235,30 @@ export const createEpochStore = ({
     return ok
   }
 
+  const viewVersion = () => {
+    const { view, system } = instance.base
+    return [view?.core, system?.core]
+      .map((core) => `${core?.fork}:${core?.length}`)
+      .join('/')
+  }
+
   const doRefresh = async () => {
     const keyPair = await getPersonalKeyPair()
     // The roster and the epoch rows must come from one view: a kick applied
     // between the two reads would pair a roster that still binds the kicked
     // device with an epoch that already left it out, and a rotation from
-    // that sealed every key to it. Reads can use a view that kept moving;
-    // writes and rotations cannot (see settle).
+    // that sealed every key to it. Autobase flushes the view and the system
+    // inside one drain and emits 'update' only after it, so the cores'
+    // lengths and forks tell a moved view, not the event count alone.
+    // Reads can use a view that kept moving; writes and rotations cannot
+    // (see settle).
     let startedAt, nextRoster, records
     for (let attempt = 1; ; attempt++) {
       startedAt = updates
+      const before = viewVersion()
       nextRoster = await readRoster()
       records = await readPrefix('epoch/')
-      viewSettled = updates === startedAt
+      viewSettled = updates === startedAt && viewVersion() === before
       if (viewSettled || attempt === 5) break
     }
     const next = resolveEpochs(records, bound(nextRoster), {
@@ -462,6 +473,8 @@ export const createEpochStore = ({
           // Whoever won may have left latest current: judge it below.
           if (!(error instanceof RotationOvertakenError)) throw error
         }
+        // The rotation's own refresh may have read a moving view.
+        await settle()
       }
       if (isStale()) throw new EpochRotationPendingError()
     }

@@ -2099,6 +2099,45 @@ describe('epochStore over real Autopass', () => {
     expect(await A.instance.get('record/r')).toBeNull()
   })
 
+  it('never seals to a kicked device when the view moves before its update event', async () => {
+    const [A, B, C] = await setup()
+    await A.store.ensureEpoch({ start: true })
+    await indexed(A, B, C)
+    await A.instance.removeWriter(C.instance.writerKey)
+    await A.store.remove('device/C')
+    await A.store.ensureEpoch({ start: true })
+    await A.store.add('record/during', 'secret')
+
+    // Autobase flushes the view inside its drain and emits 'update' only
+    // afterwards: the kick lands in B's view with no event in the window.
+    const { system } = B.instance.base
+    const get = system.get.bind(system)
+    const emit = B.instance.emit.bind(B.instance)
+    const held = []
+    let torn = true
+    system.get = async (...args) => {
+      const out = await get(...args)
+      if (torn) {
+        torn = false
+        B.instance.emit = (name, ...rest) => {
+          if (name !== 'update') return emit(name, ...rest)
+          held.push(rest)
+          return true
+        }
+        await sync(A, B)
+        B.instance.emit = emit
+      }
+      return out
+    }
+    const result = await B.store.ensureEpoch({ start: false })
+    system.get = get
+    for (const args of held) emit('update', ...args)
+    await sync(A, B, C)
+
+    expect(result.members ?? []).not.toContain('C')
+    expect(await C.store.get('record/during')).toBeNull()
+  })
+
   it('refuses a write but still reads while the view never holds still', async () => {
     const [A] = await setup(['A'])
     await A.store.ensureEpoch({ start: true })
