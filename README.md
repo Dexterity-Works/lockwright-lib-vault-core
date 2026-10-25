@@ -120,14 +120,18 @@ A vault's records are sealed under per-epoch keys (ADR 0014 in the Lockwright su
 - A vault with no epoch record stays plaintext until its first roster shrink.
 
 ```javascript
-// After removing the device's writer and rows (lib-vault's kickDevice does both):
+// lib-vault's kickDevice does all of this. In a vault with no epoch yet,
+// start one while the device is still a member, so that any member can
+// rotate past the removal if this device stops before the rotation:
+const status = await client.activeVaultGetEpochStatus()
+if (status.legacy) await client.activeVaultEnsureEpoch({ start: true })
+// ...remove the device's writer (activeVaultRemoveWriter) and its rows...
 const result = await client.activeVaultEnsureEpoch({ start: true })
 // { rotated: true, id, seq, members, uncovered }
 // or { rotated: false, reason, uncovered }, reason one of
 // 'current', 'pending', 'legacy', 'not-writable', 'self-not-in-roster'
 
-const status = await client.activeVaultGetEpochStatus()
-// { vaultId, epoch, seq, legacy, canRead, revoked, members, uncovered }
+// status: { vaultId, epoch, seq, legacy, canRead, revoked, members, uncovered }
 
 client.on('epoch-status', (status) => {
   // pushed when the active vault's status changes
