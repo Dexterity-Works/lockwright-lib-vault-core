@@ -36,12 +36,14 @@ describe('lock during the first kick (lifecycle)', () => {
   // the first rotation, and locks (closeAllInstances, as lockAppSession
   // does) while the kick is in flight: by default on the kick's first write
   // (the removeWriter append), with LOCKWRIGHT_LOCK_AT=start as soon as the
-  // kick is issued. Expected: either the kick finished before the close
-  // (kick-first); or the close interrupted it before any write landed, so
-  // the kick failed whole and a retry does it (interrupted-clean); or the
-  // close interrupted it after a write and the start it owed was persisted
-  // (START_OWED), so ensureEpoch() after unlock finishes the rotation
-  // (interrupted-owed). Either way A and B end on one epoch with members A
+  // kick is issued. Expected: with the lock on the first write, the close
+  // interrupts the kick after the removal landed and the start it owed is
+  // persisted (START_OWED), so the first record A adds after unlock starts
+  // the epoch and is sealed (interrupted-owed); the app runs no ensure on
+  // unlock (syncEpoch({ ensure: false })), so the test runs none either.
+  // With the lock at the start, the close interrupts the kick before any
+  // write landed, so the kick failed whole and a retry does it
+  // (interrupted-clean). Either way A and B end on one epoch with members A
   // and B, C is no longer a writer and cannot read the epoch, and nothing A
   // writes afterwards is plaintext. C never held a key (the first epoch
   // excludes it), so its status is not `revoked` (epochStore status(): a
@@ -51,7 +53,8 @@ describe('lock during the first kick (lifecycle)', () => {
   // roster writes and its ensureEpoch({ start: true }) left the vault
   // legacy, so A's next record was plaintext and the kicked C read it.
   // vaultRemoveWriter now owes the start before the removal lands
-  // (epochStore oweStart), so unlock's ensureEpoch finishes the rotation.
+  // (epochStore oweStart), and epochStore add starts an owed epoch before
+  // it writes to a legacy vault.
   test('A locks while its kick of C is in flight; the rotation still lands', async () => {
     const lockAt = process.env.LOCKWRIGHT_LOCK_AT ?? 'append'
     let armed = false
@@ -60,7 +63,12 @@ describe('lock during the first kick (lifecycle)', () => {
     net = await createNetwork({
       peers: ['A', 'B', 'C'],
       onEvent: (line) => {
-        if (!armed || line.peer !== 'A' || line.event !== 'autobase.append') {
+        if (
+          !armed ||
+          line.peer !== 'A' ||
+          line.event !== 'autobase.append' ||
+          line.label !== 'vault'
+        ) {
           return
         }
         armed = false
@@ -94,9 +102,6 @@ describe('lock during the first kick (lifecycle)', () => {
     await A.unlock()
     const owedOnDisk =
       (await A.instance.base.local.getUserData(START_OWED))?.toString() ?? null
-    const ensured = await A.ensureEpoch()
-    // An update's epoch sync can run the owed start before this call does.
-    const afterEnsure = await A.epochStatus()
     const tracer = net.tracers.A
     const [tKick] = at(tracer, 'peer.kick', (e) => e.t)
     const [tLocked] = at(tracer, 'peer.locked', (e) => e.t)
@@ -114,10 +119,25 @@ describe('lock during the first kick (lifecycle)', () => {
       outcome = 'kick-hung'
     } else if (appendsDuringKick === 0) {
       outcome = 'interrupted-clean'
-    } else if (ensured.rotated || !afterEnsure.legacy) {
-      outcome = 'interrupted-owed'
     } else {
-      outcome = 'interrupted-lost'
+      outcome = 'interrupted'
+    }
+    if (outcome === 'interrupted-clean') {
+      // No roster write landed: the kick failed whole and is done again.
+      // An owed start may have rotated on unlock with C still a member.
+      expect(await A.kick('device-C')).toMatchObject({
+        rotated: true,
+        members: ['device-A', 'device-B']
+      })
+    }
+
+    // Nothing written after the kick is plaintext. After an interrupted
+    // kick this is A's first write since unlock.
+    await A.add('note/after', { text: 'members only' })
+    const stored = await A.raw('note/after')
+    const sealed = isEnvelope(stored.value)
+    if (outcome === 'interrupted') {
+      outcome = sealed ? 'interrupted-owed' : 'interrupted-lost'
     }
     const devices = (await A.devices()).map((d) => d.id).sort()
     A.trace('race.outcome', {
@@ -128,8 +148,7 @@ describe('lock during the first kick (lifecycle)', () => {
       kick: kicked.status,
       kickError: kicked.reason?.message ?? null,
       kickResult: kicked.value ?? null,
-      ensured,
-      legacyAfterEnsure: afterEnsure.legacy,
+      sealed,
       lockMs: locked.value,
       devices
     })
@@ -137,19 +156,7 @@ describe('lock during the first kick (lifecycle)', () => {
     console.log(
       `race: ${outcome} (lock at ${lockAt}; kick ${kicked.status}${kicked.reason ? `: ${kicked.reason.message}` : ''}; ${appendsDuringKick} append(s) before the close; owed on disk ${owedOnDisk}; devices ${devices.join(',')}; lock ${locked.value} ms)`
     )
-    if (outcome === 'interrupted-clean') {
-      // No roster write landed: the kick failed whole and is done again.
-      // An owed start may have rotated on unlock with C still a member.
-      expect(await A.kick('device-C')).toMatchObject({
-        rotated: true,
-        members: ['device-A', 'device-B']
-      })
-    }
-
-    // Nothing written after the kick is plaintext.
-    await A.add('note/after', { text: 'members only' })
-    const stored = await A.raw('note/after')
-    if (!isEnvelope(stored.value)) {
+    if (!sealed) {
       // The consequence, for the timeline: does the kicked device read it?
       const cReads = await quiet(
         waitFor(() => C.get('note/after'), { timeout: 10000 })
@@ -161,10 +168,12 @@ describe('lock during the first kick (lifecycle)', () => {
         cDevices: (await C.devices()).map((d) => d.id).sort()
       })
     }
-    expect(isEnvelope(stored.value)).toBe(true)
+    expect(sealed).toBe(true)
     expect(stored.value).not.toContain('members only')
-    expect(['kick-first', 'interrupted-clean', 'interrupted-owed']).toContain(
-      outcome
+    // Each lock point tests one path; a timing shift that lands in another
+    // fails here instead of passing without testing it.
+    expect(outcome).toBe(
+      lockAt === 'start' ? 'interrupted-clean' : 'interrupted-owed'
     )
 
     // End state: one epoch, members A and B, on A and B.
