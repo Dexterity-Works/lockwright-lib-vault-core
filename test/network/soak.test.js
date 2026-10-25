@@ -61,13 +61,26 @@ describe('seeded soak', () => {
           await victim.restartVault()
           faults.restart++
         }
+        // One operation per key per round: two peers writing the same key
+        // before they sync are concurrent, and Autobase's linearization, not
+        // program order, decides which one wins. The model assumes a single
+        // last writer per key, so a round never touches a key twice.
+        const touched = new Set()
         for (let i = 0; i < 1 + Math.floor(random() * 6); i++) {
           const writer = pick(live.filter((p) => !offline.includes(p)))
           const key = `note/${Math.floor(random() * 40)}`
+          if (touched.has(key)) continue
+          touched.add(key)
           if (random() < 0.15 && expected.has(key)) {
             await writer.remove(key)
             expected.delete(key)
             faults.removes++
+            net.tracers.A.record('soak.op', {
+              round,
+              op: 'remove',
+              key,
+              by: writer.id
+            })
           } else {
             const value = {
               round,
@@ -77,6 +90,12 @@ describe('seeded soak', () => {
             await writer.add(key, value)
             expected.set(key, value)
             faults.writes++
+            net.tracers.A.record('soak.op', {
+              round,
+              op: 'add',
+              key,
+              by: writer.id
+            })
           }
         }
         await sleep(200 + Math.floor(random() * 800))
