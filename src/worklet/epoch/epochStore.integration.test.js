@@ -2282,6 +2282,29 @@ describe('epochStore over real Autopass', () => {
     expect(await B.instance.get('record/s')).toBeNull()
   })
 
+  it('treats an envelope of an unknown version as unreadable, not as a value', async () => {
+    const [A] = await setup(['A'])
+    await A.store.ensureEpoch({ start: true })
+    const later = JSON.stringify({
+      $enc: 2,
+      e: 'ff'.repeat(16),
+      n: 'AA==',
+      c: 'AA=='
+    })
+    await A.instance.add('record/next', later)
+    const unreadable = []
+
+    expect(await A.store.get('record/next')).toBeNull()
+    expect(
+      await A.store.find({
+        gte: { key: 'record/' },
+        lt: { key: 'record0' },
+        onUnreadable: (key) => unreadable.push(key)
+      })
+    ).toEqual([])
+    expect(unreadable).toEqual(['record/next'])
+  })
+
   it('reports each row find cannot read to onUnreadable', async () => {
     const [A] = await setup(['A'])
     await A.store.ensureEpoch({ start: true })

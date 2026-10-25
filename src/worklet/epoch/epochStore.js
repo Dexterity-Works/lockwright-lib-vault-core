@@ -13,7 +13,6 @@ import {
   decryptValue,
   encryptValue,
   generateEpochKey,
-  isEnvelope,
   openRing,
   opensCheck,
   sealCheck,
@@ -353,8 +352,19 @@ export const createEpochStore = ({
   // Throws EpochKeyUnavailableError / EpochDecryptError for unreadable values.
   // `pass` is shared by every row of one get or find call, so the call
   // refreshes at most once however many rows it cannot read.
+  // Any `$enc`, not only version 1: a later build's envelope is unreadable
+  // here, not a plaintext value to hand out or merge over.
+  const isSealed = (value) => {
+    try {
+      const parsed = typeof value === 'string' ? JSON.parse(value) : value
+      return !!parsed && typeof parsed === 'object' && '$enc' in parsed
+    } catch {
+      return false
+    }
+  }
+
   const decodeRecord = async (key, record, pass) => {
-    if (isPlaintextKey(key) || !isEnvelope(record.value)) {
+    if (isPlaintextKey(key) || !isSealed(record.value)) {
       return { value: record.value, file: record.file ?? null }
     }
     try {
