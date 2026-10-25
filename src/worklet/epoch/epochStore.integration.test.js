@@ -2037,6 +2037,54 @@ describe('epochStore over real Autopass', () => {
     expect(await C.store.get('record/during')).toBeNull()
   })
 
+  it('starts an owed epoch before a write instead of writing plaintext', async () => {
+    const [A, B, C] = await setup()
+    await sync(A, B, C)
+    await A.instance.removeWriter(C.instance.writerKey)
+    await A.store.remove('device/C')
+    const add = A.instance.add.bind(A.instance)
+    let fail = true
+    A.instance.add = async (key, ...rest) => {
+      if (fail && key.startsWith('epoch/')) {
+        fail = false
+        throw new Error('append failed')
+      }
+      return add(key, ...rest)
+    }
+    await expect(A.store.ensureEpoch({ start: true })).rejects.toThrow(
+      'append failed'
+    )
+
+    await A.store.add('record/after', 'secret')
+    await sync(A, B, C)
+
+    expect((await A.store.status()).legacy).toBe(false)
+    expect((await rawEnvelope(A, 'record/after')).$enc).toBe(1)
+    expect(await value(B, 'record/after')).toBe('secret')
+    expect(await C.store.get('record/after')).toBeNull()
+  })
+
+  it('refuses a plaintext write while an owed start cannot run', async () => {
+    const [A] = await setup(['A'])
+    await A.instance.base.local.setUserData(
+      'lockwright/epoch-start-owed',
+      Buffer.from('1')
+    )
+    const store = createEpochStore({
+      instance: A.instance,
+      getPersonalKeyPair: async () => A.keyPair
+    })
+    Object.defineProperty(A.instance.base, 'writable', {
+      value: false,
+      configurable: true
+    })
+
+    await expect(store.add('record/r', 'v')).rejects.toBeInstanceOf(
+      EpochRotationPendingError
+    )
+    expect(await A.instance.get('record/r')).toBeNull()
+  })
+
   it('refuses a write but still reads while the view never holds still', async () => {
     const [A] = await setup(['A'])
     await A.store.ensureEpoch({ start: true })

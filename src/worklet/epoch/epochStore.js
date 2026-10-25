@@ -430,6 +430,12 @@ export const createEpochStore = ({
     // Always re-resolve before a write: a stale epoch would leak the value
     // to a device that was just removed.
     await settle()
+    // An owed start is a kick or leave whose first rotation failed: the
+    // removed device must not read this write in plaintext.
+    if (legacy && !isPlaintextKey(key) && (await readStartOwed()) === true) {
+      await ensureEpoch({ start: true })
+      if (legacy) throw new EpochRotationPendingError()
+    }
     if (isPlaintextKey(key) || legacy) {
       return instance.add(key, signRow(key, value), file)
     }
