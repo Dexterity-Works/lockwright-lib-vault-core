@@ -4,7 +4,9 @@ import {
   holdsEpoch,
   holdsMembers,
   indexOf,
+  noKeyAfter,
   revokedStatus,
+  sameList,
   sealedFrom,
   shareVault,
   statusPushed
@@ -60,10 +62,11 @@ describe('revoke of a device that is offline when kicked (ADR 0014)', () => {
     await C.goOnline()
     const status = await revokedStatus(
       C,
-      (s) =>
-        s.epoch !== first.id && JSON.stringify(s.members) === JSON.stringify(AB)
+      (s) => s.epoch !== first.id && sameList(s.members, AB)
     )
     expect(status).toMatchObject({ canRead: false, members: AB })
+    // Every epoch above the first, as C's own store holds them: no box for C.
+    await noKeyAfter(C, { lastHeldSeq: first.seq })
     await sealedFrom(C, 'note/after', 'members only')
     expect(await C.get('note/before')).toMatchObject({ text: 'everyone' })
     expect((await A.devices()).map((d) => d.id).sort()).toEqual(AB)
