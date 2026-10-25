@@ -6,7 +6,7 @@ import { Peer } from './peer.js'
 import { startRelay, startTestnet } from './testnet.js'
 import { writeTimeline } from './timeline.js'
 import { mkdtemp, removeDir } from './tmp.js'
-import { Tracer } from './tracer.js'
+import { short, Tracer } from './tracer.js'
 
 /* global jest, expect */
 
@@ -317,6 +317,147 @@ export const settledEpoch = (peers, want) =>
       label: `${peers.map((p) => p.id).join(', ')} settle on one epoch sealed to ${want.join(', ')}`
     }
   )
+
+/** Two lists equal element by element, in order. */
+export const sameList = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+
+/**
+ * Like settledEpoch, but the product has to get there by itself: wait
+ * until every peer reads under one epoch sealed to exactly `want`, each
+ * peer's last pushed epoch status names that epoch, and no peer in `peers`
+ * pushed a status for `quiet` ms. Only then call ensureEpoch once per peer;
+ * throws if any of them rotated, since that is a rotation the product owed
+ * and its own triggers (update, reconcile) did not make. Resolves the
+ * agreed status.
+ * @param {{ events: object[] }} net
+ * @param {import('./peer.js').Peer[]} peers
+ * @param {string[]} want
+ * @param {{ quiet?: number, timeout?: number }} [options]
+ */
+export const settledUnaided = async (
+  net,
+  peers,
+  want,
+  { quiet = 1000, timeout = 30000 } = {}
+) => {
+  const ids = new Set(peers.map((p) => p.id))
+  const read = () => Promise.all(peers.map((p) => p.epochStatus()))
+  const agree = (all) =>
+    all.every(
+      (s) =>
+        s.canRead &&
+        s.epoch !== null &&
+        s.epoch === all[0].epoch &&
+        sameList(s.members, want)
+    )
+  const pushes = () =>
+    net.events.filter((e) => ids.has(e.peer) && e.event === 'epoch.status')
+  const lastPushed = (peer) =>
+    net.events.findLast((e) => e.peer === peer.id && e.event === 'epoch.status')
+  const label = `${peers.map((p) => p.id).join(', ')} settle unaided on one epoch sealed to ${want.join(', ')}`
+  let mark = null
+  const before = await waitFor(
+    async () => {
+      const all = await read()
+      const pushed = peers.map(lastPushed)
+      if (
+        !agree(all) ||
+        !pushed.every((e) => e?.canRead && e.epoch === short(all[0].epoch))
+      ) {
+        mark = null
+        return false
+      }
+      const count = pushes().length
+      if (mark?.count !== count || mark.epoch !== all[0].epoch) {
+        mark = { count, epoch: all[0].epoch, at: Date.now() }
+        return false
+      }
+      return Date.now() - mark.at >= quiet ? all[0] : false
+    },
+    { timeout, label }
+  )
+  const results = []
+  for (const peer of peers) results.push([peer.id, await peer.ensureEpoch()])
+  const rotated = results.filter(([, r]) => r.rotated)
+  if (rotated.length) {
+    throw new Error(
+      `${label}: ensureEpoch still rotated on ${rotated
+        .map(([id, r]) => `${id} (seq ${r.seq})`)
+        .join(', ')} after ${quiet} ms quiet on epoch ${short(before.epoch)}`
+    )
+  }
+  const after = await read()
+  if (!agree(after) || after[0].epoch !== before.epoch) {
+    throw new Error(`${label}: the epoch moved across the ensureEpoch check`)
+  }
+  return after[0]
+}
+
+/**
+ * `peer`'s own `epoch/` rows, parsed, read raw through its Autopass once
+ * its view caught up with what it holds. Unparsable rows are left out: they
+ * carry no box.
+ * @returns {Promise<Array<{ key: string, record: object }>>}
+ */
+export const epochRows = async (peer) => {
+  await peer.instance.base.update()
+  const rows = []
+  for await (const { key, value } of peer.instance.list()) {
+    if (!key.startsWith('epoch/')) continue
+    try {
+      rows.push({ key, record: JSON.parse(value) })
+    } catch {}
+  }
+  return rows
+}
+
+/** Whether epoch `record` holds a box for `peer`, by device id or topic. */
+export const listsPeer = (record, peer) => {
+  const members = record?.members
+  if (!members || typeof members !== 'object') return false
+  return (
+    Object.hasOwn(members, peer.deviceId) ||
+    Object.values(members).some(
+      (m) => String(m?.topic).toLowerCase() === peer.masterTopic
+    )
+  )
+}
+
+/**
+ * The removed `peer` got no key after the last epoch it legitimately held:
+ * on its own store, no `epoch/` row with seq above `lastHeldSeq` holds a
+ * box for it (ADR 0014: a box carries the whole ring, and a device opens any
+ * valid record's box for its topic, so status.canRead on the latest alone
+ * proves too little). `allow` names rows the ADR's honest limit lets it
+ * read. Fails when no row above `lastHeldSeq` is there yet: the check would
+ * be vacuous. Resolves `{ above, allowed }`, rows above and the allowed
+ * ones that list it.
+ * @param {import('./peer.js').Peer} peer
+ * @param {{ lastHeldSeq: number, allow?: (record: object) => boolean }} options
+ */
+export const noKeyAfter = async (
+  peer,
+  { lastHeldSeq, allow = () => false }
+) => {
+  const above = (await epochRows(peer)).filter(
+    ({ record }) => Number(record?.seq) > lastHeldSeq
+  )
+  expect(above.length).toBeGreaterThan(0)
+  const listing = above.filter(({ record }) => listsPeer(record, peer))
+  const leaked = listing
+    .filter(({ record }) => !allow(record))
+    .map(({ key, record }) => ({
+      key,
+      seq: record.seq,
+      by: short(record.by),
+      members: Object.keys(record.members).sort()
+    }))
+  expect(leaked).toEqual([])
+  return {
+    above: above.length,
+    allowed: listing.filter(({ record }) => allow(record)).length
+  }
+}
 
 /**
  * Wait until `peer` reports itself revoked, and `where` holds for that
