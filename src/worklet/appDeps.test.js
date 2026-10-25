@@ -748,6 +748,21 @@ describe('appDeps module functions (excluding encryption)', () => {
       const result = await appDeps.activeVaultList('test')
       expect(result).toEqual([1, 3])
     })
+
+    test('activeVaultList without a filter includes values and skips JSON null', async () => {
+      await appDeps.initActiveVaultInstance({
+        id: 'vault1',
+        encryptionKey: 'key'
+      })
+      const { put } = useMemoryVault(appDeps.getActiveVaultInstance())
+      put('visible', JSON.stringify({ visible: true }))
+      put('empty', 'null')
+
+      const result = await appDeps.activeVaultList()
+
+      expect(result).toContainEqual({ visible: true })
+      expect(result).not.toContain(null)
+    })
   })
 
   describe('exportOtpRecords', () => {
@@ -1356,6 +1371,50 @@ describe('appDeps module functions (excluding encryption)', () => {
       expect(stored).not.toContain('after')
     })
 
+    test('activeVaultAdd creates the v2 twin when a v1 record has none', async () => {
+      await appDeps.activeVaultAdd('record/new', {
+        id: 'new',
+        type: 'note',
+        data: { title: 'new record' }
+      })
+
+      expect(JSON.parse(vault.rows.get('record-v2/new').value)).toMatchObject({
+        schema: 2,
+        data: { title: 'new record' }
+      })
+    })
+
+    test('activeVaultAdd merges a v1 edit into its existing v2 twin', async () => {
+      await appDeps.activeVaultAdd('record/edited', {
+        id: 'edited',
+        type: 'note',
+        data: { title: 'first' }
+      })
+      await appDeps.activeVaultAdd('record/edited', {
+        id: 'edited',
+        type: 'note',
+        updatedAt: 2,
+        data: { title: 'second' }
+      })
+
+      expect(
+        JSON.parse(vault.rows.get('record-v2/edited').value)
+      ).toMatchObject({
+        updatedAt: 2,
+        data: { title: 'second' }
+      })
+    })
+
+    test('activeVaultEnsureEpoch defaults to leaving a legacy vault alone', async () => {
+      const result = await appDeps.activeVaultEnsureEpoch()
+
+      expect(result.rotated).toBe(false)
+      expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+        legacy: true,
+        epoch: null
+      })
+    })
+
     test('activeVaultAdd signs a device row that names this writer', async () => {
       const writerKey = appDeps.activeVaultGetWriterKey()
       const row = {
@@ -1604,6 +1663,15 @@ describe('appDeps module functions (excluding encryption)', () => {
       expect(
         [...vault.rows.keys()].filter((key) => key.startsWith('record-v2/'))
       ).toEqual([])
+    })
+
+    test('vaultRemove leaves a malformed key outside the record file set', async () => {
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      vault.put('record-v2/r1/file/', JSON.stringify({ name: 'bad key' }))
+
+      await appDeps.vaultRemove('record/r1')
+
+      expect(vault.rows.has('record-v2/r1/file/')).toBe(true)
     })
 
     test('opens a vault whose migration waits on an epoch rotation', async () => {
@@ -2368,6 +2436,18 @@ describe('appDeps module functions (excluding encryption)', () => {
         expect(await appDeps.activeVaultGet('record-v2/r1')).toMatchObject({
           data: { title: 'kept' }
         })
+      })
+
+      test('keeps a readable record while an unrelated row is unreadable', async () => {
+        const fireUpdate = await seenRecord()
+        vault.put('misc/private', unreadable)
+
+        await fireUpdate()
+
+        expect(await appDeps.activeVaultGet('record/r1')).toMatchObject({
+          data: { title: 'kept' }
+        })
+        expect(vault.rows.get('misc/private').value).toBe(unreadable)
       })
 
       test('does not rebuild a v2 record it cannot read from its v1', async () => {
