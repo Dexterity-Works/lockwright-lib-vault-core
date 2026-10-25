@@ -447,9 +447,9 @@ const createActiveVaultAdapter = (store = epochStore) => {
  * @param {string} key
  * @returns {Promise<boolean>} whether the row exists but cannot be read here
  */
-const isUnreadableRow = async (key) => {
+const isUnreadableRow = async (key, store = epochStore) => {
   let unreadable = false
-  await epochStore.find({
+  await store.find({
     gte: { key },
     lte: { key },
     onUnreadable: () => {
@@ -1141,21 +1141,32 @@ export const activeVaultAdd = async (key, data, file, fileName) => {
   if (!isActiveVaultInitialized) {
     throw new Error('Vault not initialised')
   }
+  // Every write of this call goes to the vault it started in: a switch
+  // mid-save would seal this record's twin into the other vault.
+  const store = epochStore
+  const write = (...args) => {
+    if (store !== epochStore) throw new Error(ACTIVE_VAULT_CHANGED)
+    return store.add(...args)
+  }
+  const getRaw = async (k) => {
+    const res = await store.get(k)
+    return res?.value ? JSON.parse(res.value) : null
+  }
   try {
-    await epochStore.add(key, JSON.stringify(data), file)
+    await store.add(key, JSON.stringify(data), file)
 
     // Local dual-write / projection (companion namespace). Uses the store directly to avoid recursion.
     if (isV1RecordKey(key)) {
       const id = parseRecordIdFromKey(key)
       // A v2 twin this device cannot read is not missing: rebuilding it
       // from v1 would seal over content it never saw.
-      if (id && !(await isUnreadableRow(recordKeyV2(id)))) {
-        const existingV2 = await activeVaultGetRaw(recordKeyV2(id))
+      if (id && !(await isUnreadableRow(recordKeyV2(id), store))) {
+        const existingV2 = await getRaw(recordKeyV2(id))
         const nextV2 =
           mergeV1IntoV2(data, existingV2) ||
           (!existingV2 ? convertV1RecordToV2(data) : null)
         if (nextV2 && !deepEqualJson(nextV2, existingV2)) {
-          await epochStore.add(recordKeyV2(id), JSON.stringify(nextV2))
+          await write(recordKeyV2(id), JSON.stringify(nextV2))
         }
       }
     } else if (isV2RecordKey(key)) {
@@ -1164,20 +1175,20 @@ export const activeVaultAdd = async (key, data, file, fileName) => {
         const asV2 =
           data?.schema === SCHEMA_V2 ? data : convertV1RecordToV2(data)
         if (asV2 !== data) {
-          await epochStore.add(key, JSON.stringify(asV2), file)
+          await write(key, JSON.stringify(asV2), file)
         }
         const projected = projectV2ToV1(asV2)
-        const existingV1 = await activeVaultGetRaw(recordKeyV1(id))
+        const existingV1 = await getRaw(recordKeyV1(id))
         if (!existingV1 || !deepEqualJson(existingV1, projected)) {
-          await epochStore.add(recordKeyV1(id), JSON.stringify(projected))
+          await write(recordKeyV1(id), JSON.stringify(projected))
         }
       }
     } else if (isV1FileKey(key)) {
       const v2Key = v1FileKeyToV2(key)
       if (v2Key) {
-        const existing = await epochStore.get(v2Key)
+        const existing = await store.get(v2Key)
         if (!existing?.file) {
-          await epochStore.add(
+          await write(
             v2Key,
             JSON.stringify(data && typeof data === 'object' ? data : {}),
             file
@@ -1188,9 +1199,9 @@ export const activeVaultAdd = async (key, data, file, fileName) => {
       const parsed = parseFileKey(key)
       if (parsed) {
         const v1Key = fileKeyV1(parsed.recordId, parsed.fileId)
-        const existing = await epochStore.get(v1Key)
+        const existing = await store.get(v1Key)
         if (!existing?.file) {
-          await epochStore.add(
+          await write(
             v1Key,
             JSON.stringify(data && typeof data === 'object' ? data : {}),
             file

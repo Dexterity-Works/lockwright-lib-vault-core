@@ -523,6 +523,46 @@ describe('appDeps module functions (excluding encryption)', () => {
       )
     })
 
+    test('a vault switch during a save writes nothing into the new vault', async () => {
+      await appDeps.initActiveVaultInstance({
+        id: 'vault1',
+        encryptionKey: 'key'
+      })
+      const first = appDeps.getActiveVaultInstance()
+      const { rows: firstRows } = useMemoryVault(first)
+      const originalAdd = first.add
+      let releaseFirstWrite
+      const firstWriteGate = new Promise((resolve) => {
+        releaseFirstWrite = resolve
+      })
+      first.add = jest.fn(async (...args) => {
+        await originalAdd(...args)
+        if (args[0] === 'record-v2/race') await firstWriteGate
+      })
+
+      const data = convertV1RecordToV2({
+        id: 'race',
+        data: { title: 'from vault 1' },
+        updatedAt: 10
+      })
+      const pending = appDeps.activeVaultAdd('record-v2/race', data)
+      await waitFor(() => first.add.mock.calls.length === 1)
+
+      await appDeps.initActiveVaultInstance({
+        id: 'vault2',
+        encryptionKey: 'key'
+      })
+      const second = appDeps.getActiveVaultInstance()
+      const { rows: secondRows } = useMemoryVault(second)
+
+      releaseFirstWrite()
+      await expect(pending).rejects.toThrow('Active vault changed')
+
+      expect(firstRows.has('record-v2/race')).toBe(true)
+      expect(secondRows.has('record/race')).toBe(false)
+      expect(secondRows.has('record-v2/race')).toBe(false)
+    })
+
     test('vaultsGet calls get on vaultsInstance and returns result', async () => {
       const result = await appDeps.vaultsGet('key4')
       expect(result.id).toEqual('vault-id')
