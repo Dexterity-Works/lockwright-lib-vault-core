@@ -177,6 +177,20 @@ export const createNetwork = async ({
 export const indexOf = (events, peer, event, where = () => true) =>
   events.findIndex((e) => e.peer === peer && e.event === event && where(e))
 
+/** `peer`'s recorded `event`s whose fields equal every entry in `where`. */
+export const of = (net, peer, event, where = {}) =>
+  net.tracers[peer].events.filter(
+    (e) =>
+      e.event === event && Object.entries(where).every(([k, v]) => e[k] === v)
+  )
+
+/** How many writers the active vault's Autobase counts. */
+export const members = (peer) => peer.instance.base.system.members
+
+/** The active vault's invite row as autopass member onadd reads it, or null. */
+export const inviteRow = (peer) =>
+  peer.instance.base.view.findOne('@autopass/invite', {})
+
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
