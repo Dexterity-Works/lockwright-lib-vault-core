@@ -1,16 +1,16 @@
-import { createNetwork, pairOrCancel, waitFor } from './harness.js'
+import {
+  createNetwork,
+  inviteRow,
+  members,
+  of,
+  pairOrCancel,
+  waitFor
+} from './harness.js'
 
 // One invite, two joiners. autopass deletes the invite after the first
-// confirmed join (member onadd, autopass/index.js:332-348), so a request
-// that arrives later is never answered and lib-vault's timeout cancels it.
-
-const of = (net, peer, event, where = {}) =>
-  net.tracers[peer].events.filter(
-    (e) =>
-      e.event === event && Object.entries(where).every(([k, v]) => e[k] === v)
-  )
-
-const members = (peer) => peer.instance.base.system.members
+// confirmed join (member onadd, autopass/index.js:332-349), so a request
+// that is read after that delete is never answered and lib-vault's timeout
+// cancels it.
 
 const pairingTimeout = 8000
 
@@ -22,8 +22,48 @@ const seesDevices = async (peers, n) => {
   }
 }
 
-// A joiner that lost: never paired, cancelled, pairer swarm gone.
-const expectCancelled = (net, peer, result) => {
+/**
+ * Hold `peer`'s member onadd until requests from `n` pairing sessions have
+ * entered it, then let them all through in the same tick, so every one of
+ * them reads the invite row before any del-invite is appended. Bounded: on
+ * `timeout` the held calls go through and `met` stays false.
+ */
+const holdOnadd = (peer, { n = 2, timeout = 10000 } = {}) => {
+  const member = peer.instance.member
+  const onadd = member.onadd
+  const sessions = new Set()
+  let release
+  const released = new Promise((resolve) => {
+    release = resolve
+  })
+  const timer = setTimeout(release, timeout)
+  const gate = {
+    met: false,
+    sessions,
+    restore: () => {
+      clearTimeout(timer)
+      release()
+      member.onadd = onadd
+    }
+  }
+  member.onadd = async (request) => {
+    const session = Buffer.from(request.requestData.session).toString('hex')
+    sessions.add(session)
+    peer.trace('test.onadd', { n: sessions.size })
+    if (sessions.size >= n) {
+      gate.met = true
+      clearTimeout(timer)
+      release()
+    }
+    await released
+    return onadd(request)
+  }
+  return gate
+}
+
+// A joiner that lost: never paired, cancelled, pairer swarm gone, and A saw
+// every connection from the loser's pairer close.
+const expectCancelled = async (net, peer, result) => {
   expect(result.paired).toBe(false)
   expect(result.error.message).toMatch(/Pairing closed/)
   expect(peer.vaultId).toBeNull()
@@ -33,34 +73,85 @@ const expectCancelled = (net, peer, result) => {
   expect(of(net, peer.id, 'peer.pairTimeout')).toHaveLength(1)
   expect(of(net, peer.id, 'swarm.destroy', { label: 'pairer' })).toHaveLength(1)
   expect(of(net, peer.id, 'error', { where: 'peer.pair' })).toHaveLength(1)
+  const pairer = of(net, peer.id, 'swarm.create', { label: 'pairer' })[0].key
+  await waitFor(
+    () => {
+      const where = { label: 'vault', remote: pairer }
+      const closed = of(net, 'A', 'conn.close', where).length
+      return closed > 0 && closed === of(net, 'A', 'conn.open', where).length
+    },
+    { label: `A saw ${peer.id}'s cancelled pairer leave` }
+  )
 }
 
 describe('two joiners on the same invite', () => {
   let net = null
+  let gate = null
 
   afterEach(async () => {
+    gate?.restore()
+    gate = null
     await net?.destroy()
     net = null
   })
 
-  // Finding P1: both concurrent joiners are accepted on one invite. The
-  // member's onadd reads the invite row, then awaits add-writer and confirm
-  // before del-invite (autopass/index.js:334-348); a second request that
-  // lands in that window still finds the row. Single use holds only once
-  // the first join has been applied.
-  test.failing('concurrent: exactly one of B and C is accepted', async () => {
+  // Finding P1: both concurrent joiners are accepted on one invite.
+  // autopass member onadd (autopass/index.js:332-349) reads the invite row
+  // (:334), awaits addWriter (:341), calls candidate.confirm (synchronous:
+  // blind-pairing-core MemberRequest.confirm), then awaits deleteInvite
+  // (:348), which reads the row again and appends del-invite (:276-281).
+  // blind-pairing starts one onadd per request session and nothing
+  // serialises the calls (blind-pairing/index.js:456-462), so a second
+  // request read before the del-invite is applied finds the row too. The
+  // gate makes that overlap certain instead of a matter of timing.
+  // At most one, not exactly one, and no throw on a lost pairing: a run
+  // where the gate times out (one join) or nobody joins passes this and
+  // turns the test.failing red instead of hiding behind the bug.
+  test.failing(
+    'concurrent, both requests in onadd: at most one of B and C is accepted',
+    async () => {
+      net = await createNetwork({ peers: ['A', 'B', 'C'] })
+      const { A, B, C } = net.peers
+      await A.createVault({ id: 'shared' })
+      gate = holdOnadd(A)
+      const code = await A.invite()
+
+      const results = await Promise.allSettled([
+        pairOrCancel(B, code, { timeout: pairingTimeout }),
+        pairOrCancel(C, code, { timeout: pairingTimeout })
+      ])
+      const joined = results.filter(
+        (r) => r.status === 'fulfilled' && r.value.paired
+      )
+      expect(joined.length).toBeLessThanOrEqual(1)
+    }
+  )
+
+  test('concurrent: both requests reach A onadd before either joiner is answered', async () => {
     net = await createNetwork({ peers: ['A', 'B', 'C'] })
     const { A, B, C } = net.peers
     await A.createVault({ id: 'shared' })
+    gate = holdOnadd(A)
     const code = await A.invite()
 
-    const results = await Promise.all([
+    await Promise.all([
       pairOrCancel(B, code, { timeout: pairingTimeout }),
       pairOrCancel(C, code, { timeout: pairingTimeout })
     ])
-    expect(results.filter((r) => r.paired)).toHaveLength(1)
+    expect(gate.met).toBe(true)
+    expect(gate.sessions.size).toBe(2)
+    const entered = net.events.filter(
+      (e) => e.peer === 'A' && e.event === 'test.onadd'
+    )
+    const second = net.events.indexOf(entered.find((e) => e.n === 2))
+    const firstPaired = net.events.findIndex((e) => e.event === 'peer.paired')
+    expect(second).toBeGreaterThan(-1)
+    if (firstPaired > -1) expect(second).toBeLessThan(firstPaired)
   })
 
+  // Natural timing, no gate: whoever joined is on the roster and in the
+  // writer set and whoever did not is cleanly cancelled. Not a regression
+  // check for single use; that is the test.failing above.
   test('concurrent: the roster and the writer set match the joins', async () => {
     net = await createNetwork({ peers: ['A', 'B', 'C'] })
     const { A, B, C } = net.peers
@@ -84,7 +175,7 @@ describe('two joiners on the same invite', () => {
       expect(peer.vaultId).toBe('shared')
     }
     for (const peer of left) {
-      expectCancelled(net, peer, peer === B ? b : c)
+      await expectCancelled(net, peer, peer === B ? b : c)
     }
     const n = 1 + joined.length
     await seesDevices([A, ...joined], n)
@@ -107,9 +198,12 @@ describe('two joiners on the same invite', () => {
     await B.pair(code)
     await seesDevices([A, B], 2)
     await waitFor(() => members(A) === 2, { label: 'A counts two writers' })
+    await waitFor(async () => (await inviteRow(A)) === null, {
+      label: 'A reads the spent invite row as gone'
+    })
 
     const c = await pairOrCancel(C, code, { timeout: pairingTimeout })
-    expectCancelled(net, C, c)
+    await expectCancelled(net, C, c)
     expect(of(net, 'C', 'conn.open', { label: 'pairer' })).not.toHaveLength(0)
     expect((await A.devices()).map((d) => d.id).sort()).toEqual([
       'device-A',
