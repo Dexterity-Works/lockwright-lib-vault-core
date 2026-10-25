@@ -1,3 +1,5 @@
+import { createRequire } from 'module'
+
 import HyperDHT from 'hyperdht'
 import createTestnet from 'hyperdht/testnet'
 
@@ -24,8 +26,11 @@ export const startTestnet = async ({
  */
 export const startRelay = async (testnet) => {
   // hyperdht's own dependency, not declared here: loaded only by the tests
-  // that run a relay, and resolved the way hyperdht resolves it.
-  const { default: BlindRelay } = await import('blind-relay')
+  // that run a relay, and resolved from hyperdht's own node_modules (pnpm
+  // does not hoist it).
+  const BlindRelay = createRequire(require.resolve('hyperdht/package.json'))(
+    'blind-relay'
+  )
   const dht = testnet.createNode({ ephemeral: false, firewalled: false })
   await dht.fullyBootstrapped()
   const keyPair = HyperDHT.keyPair()

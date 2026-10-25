@@ -51,7 +51,10 @@ const state = {
   allowPrivate: process.env.LOCKWRIGHT_NET_ALLOW_PRIVATE === '1',
   hosts: new Set(),
   relays: new Set(),
-  violations: []
+  violations: [],
+  // Every UDX socket handed out and not yet closed, so a test can count
+  // what a swarm left behind. Bookkeeping only: nothing here blocks.
+  sockets: new Set()
 }
 
 const isPrivateV4 = (host) => {
@@ -220,6 +223,8 @@ const guardSwarm = (Hyperswarm) => {
 }
 
 const guardSocket = (socket) => {
+  state.sockets.add(socket)
+  socket.once('close', () => state.sockets.delete(socket))
   const send = socket.send.bind(socket)
   const trySend = socket.trySend.bind(socket)
   // async like the original, so a breach rejects instead of throwing
@@ -291,6 +296,8 @@ module.exports = {
   /** Register a relay the harness started; `relayThrough` may then name it. */
   allowRelay: (publicKey) => state.relays.add(toHex(publicKey)),
   violations: () => [...state.violations],
+  /** UDX sockets created through the guard that have not closed yet. */
+  liveSockets: () => [...state.sockets],
   reset: () => {
     state.hosts.clear()
     state.relays.clear()

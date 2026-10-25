@@ -3,12 +3,12 @@ import path from 'path'
 
 import guard from './guard.cjs'
 import { Peer } from './peer.js'
-import { startTestnet } from './testnet.js'
+import { startRelay, startTestnet } from './testnet.js'
 import { writeTimeline } from './timeline.js'
 import { mkdtemp, removeDir } from './tmp.js'
 import { Tracer } from './tracer.js'
 
-/* global jest */
+/* global jest, expect */
 
 // A private copy of the worklet module graph per peer. appDeps holds one
 // device in module singletons, so every peer needs its own registry. The
@@ -42,11 +42,14 @@ const currentTest = () =>
  * Every peer writes a JSONL trace under `<dir>/traces/`; when the test
  * fails (or `keep` is set) `destroy()` merges them into a timeline under
  * `test-artifacts/<test name>/` and prints its path.
- * @param {{ peers?: string[], size?: number, relayThrough?: any, relayAddresses?: Set<string>, onCreate?: Function, onUpdate?: Function, onEvent?: Function, name?: string }} options
+ * With `relay: true` a local blind relay runs on the testnet and every peer
+ * relays through it unconditionally (`net.relay` holds its key and address).
+ * @param {{ peers?: string[], size?: number, relay?: boolean, relayThrough?: any, relayAddresses?: Set<string>, onCreate?: Function, onUpdate?: Function, onEvent?: Function, name?: string }} options
  */
 export const createNetwork = async ({
   peers = ['A', 'B'],
   size = 3,
+  relay: withRelay = false,
   relayThrough = [],
   relayAddresses = new Set(),
   onCreate,
@@ -55,19 +58,31 @@ export const createNetwork = async ({
   name = 'net'
 } = {}) => {
   const testnet = await startTestnet({ size })
+  let relay = null
+  if (withRelay) {
+    relay = await startRelay(testnet)
+    relayThrough = () => relay.publicKey
+    relayAddresses = relay.addresses
+  }
   const dir = mkdtemp(name)
   const tracesDir = path.join(dir, 'traces')
   fs.mkdirSync(tracesDir, { recursive: true })
   const byId = {}
   const list = []
   const tracers = {}
+  // Every peer's events in the order they were recorded: one process, so
+  // this is a total order a test can assert across peers.
+  const events = []
   try {
     for (const id of peers) {
       const tracer = new Tracer({
         peer: id,
         file: path.join(tracesDir, `${id}.jsonl`),
         relayAddresses,
-        onEvent
+        onEvent: (line) => {
+          events.push(line)
+          onEvent?.(line)
+        }
       })
       tracers[id] = tracer
       const peer = new Peer({
@@ -87,6 +102,7 @@ export const createNetwork = async ({
   } catch (error) {
     for (const peer of list.reverse()) await peer.stop().catch(() => {})
     for (const tracer of Object.values(tracers)) tracer.close()
+    await relay?.destroy()
     await testnet.destroy()
     removeDir(dir)
     throw error
@@ -94,10 +110,12 @@ export const createNetwork = async ({
   let destroyed = null
   return {
     testnet,
+    relay,
     bootstrap: testnet.bootstrap,
     peers: byId,
     list,
     tracers,
+    events,
     dir,
     traceFiles: () => Object.values(tracers).map((t) => t.file),
     destroy: ({ keep = false } = {}) => {
@@ -109,6 +127,7 @@ export const createNetwork = async ({
   async function destroy({ keep }) {
     for (const peer of [...list].reverse()) await peer.stop({ keep: true })
     for (const tracer of Object.values(tracers)) tracer.close()
+    await relay?.destroy()
     await testnet.destroy()
     const test = currentTest()
     const wanted =
@@ -154,6 +173,10 @@ export const createNetwork = async ({
   }
 }
 
+/** Index of `peer`'s first `event` that passes `where` in `events`, or -1. */
+export const indexOf = (events, peer, event, where = () => true) =>
+  events.findIndex((e) => e.peer === peer && e.event === event && where(e))
+
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
@@ -186,6 +209,70 @@ export const waitFor = async (
   throw new Error(
     `waitFor: ${label} not met within ${timeout} ms (last: ${detail})`
   )
+}
+
+/**
+ * lib-vault's pairing flow: `pair()` raced against a timeout, then
+ * `cancelPairActiveVault()` so the pairer's swarm and store close. Resolves
+ * `{ paired: true, vaultId }` or `{ paired: false, error }` (the rejection
+ * after the cancel), never throws for a timeout.
+ * @param {import('./peer.js').Peer} peer
+ * @param {string} code
+ * @param {{ timeout?: number }} [options]
+ */
+export const pairOrCancel = async (peer, code, { timeout = 30000 } = {}) => {
+  let timer
+  const pairing = peer.pair(code)
+  const timedOut = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), timeout)
+  })
+  try {
+    const vaultId = await Promise.race([pairing, timedOut])
+    if (vaultId) return { paired: true, vaultId }
+    peer.trace('peer.pairTimeout', { timeout })
+    await peer.appDeps.cancelPairActiveVault()
+    await pairing
+    throw new Error(`${peer.id}: pair() resolved after the cancel`)
+  } catch (error) {
+    if (!/Pairing/.test(error.message)) throw error
+    return { paired: false, error }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** Wait until `peer` reads under epoch `id`; resolves its status. */
+export const holdsEpoch = (peer, id) =>
+  waitFor(
+    async () => {
+      const status = await peer.epochStatus()
+      return status.epoch === id && status.canRead ? status : false
+    },
+    { label: `${peer.id} holds epoch ${id.slice(0, 8)}` }
+  )
+
+/** Wait until `peer` reports itself revoked; resolves its status. */
+export const revokedStatus = (peer) =>
+  waitFor(
+    async () => {
+      const status = await peer.epochStatus()
+      return status.revoked ? status : false
+    },
+    { label: `${peer.id} learns it was revoked` }
+  )
+
+/**
+ * `peer` holds the row under `key` sealed (the ciphertext does not carry
+ * `plaintext`) and reads null for it: a key it lacks, not a block it has
+ * not synced (PROGRESS-network Done 10).
+ */
+export const sealedFrom = async (peer, key, plaintext) => {
+  const stored = await waitFor(() => peer.raw(key), {
+    label: `${peer.id} holds the sealed row ${key}`
+  })
+  expect(stored.value).not.toContain(plaintext)
+  expect(await peer.get(key)).toBeNull()
+  return stored
 }
 
 /** Wait until every peer reads the same value under `key`. */

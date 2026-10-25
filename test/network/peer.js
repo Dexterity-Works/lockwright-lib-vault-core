@@ -280,6 +280,46 @@ export class Peer {
     await this.listen()
   }
 
+  /**
+   * Make another vault this device owns the active one, as lib-vault does
+   * on a vault switch: appDeps closes the previous instance itself.
+   */
+  switchVault({ id, encryptionKey }) {
+    this.trace('peer.switchVault', { from: this.vaultId, vaultId: id })
+    this.vaultId = id
+    this.encryptionKey = encryptionKey
+    return this.openVault()
+  }
+
+  /**
+   * lockAppSession, as the desktop app does it: close every instance, the
+   * active vault first. Returns how long the close took, in ms.
+   */
+  async lock() {
+    this.trace('peer.lock')
+    const t0 = Date.now()
+    await this.appDeps.closeAllInstances()
+    const ms = Date.now() - t0
+    this.trace('peer.locked', { ms })
+    return ms
+  }
+
+  /** Unlock: the master vault with the same keys, then the active vault. */
+  async unlock() {
+    this.trace('peer.unlock')
+    // The master vault's Autopass is built again: label it as such.
+    this.started = false
+    try {
+      await this.appDeps.masterVaultInit({
+        encryptionKey: this.masterKey,
+        hashedPassword: this.hashedPassword
+      })
+    } finally {
+      this.started = true
+    }
+    if (this.vaultId) await this.openVault()
+  }
+
   async stop({ keep = false } = {}) {
     this.trace('peer.stop')
     const steps = [
