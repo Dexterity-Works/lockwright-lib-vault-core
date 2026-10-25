@@ -2637,6 +2637,51 @@ describe('epochStore over real Autopass', () => {
     expect(await value(P, 'record/2')).toBeNull()
   })
 
+  it('shows an older build no plaintext of a sealed value or file', async () => {
+    const [A, B, O] = await setup()
+    await A.store.ensureEpoch({ start: true })
+    const secret = 'hunter2-sealed'
+    await A.store.add(
+      'record-v2/s',
+      JSON.stringify({ id: 's', data: { password: secret } }),
+      Buffer.from(`file ${secret}`)
+    )
+    await sync(A, B, O)
+
+    // An older build reads straight from Autopass.
+    const raw = await O.instance.get('record-v2/s')
+    expect(raw.value).not.toContain(secret)
+    expect(JSON.parse(raw.value).$enc).toBe(1)
+    expect(raw.file.length).toBeGreaterThan(0)
+    expect(raw.file.includes(secret)).toBe(false)
+    const current = await B.store.get('record-v2/s')
+    expect(JSON.parse(current.value).data).toEqual({ password: secret })
+    expect(current.file.toString()).toBe(`file ${secret}`)
+  })
+
+  it("reads an envelope an older build's merge added plaintext to as its sealed value", async () => {
+    const [A] = await setup(['A'])
+    await A.store.ensureEpoch({ start: true })
+    await A.store.add('record-v2/x', JSON.stringify({ id: 'x', updatedAt: 1 }))
+    // An older build's dual-store merge spreads the envelope it cannot read
+    // into a v2 record and writes it back plaintext.
+    const merged = {
+      ...(await rawEnvelope(A, 'record-v2/x')),
+      id: 'x',
+      schema: 2,
+      updatedAt: 2,
+      data: { password: 'typed on the old build' }
+    }
+    await A.instance.add('record-v2/x', JSON.stringify(merged))
+
+    // The new build reads the sealed value; the old build's edit lives on in
+    // its plaintext v1 twin, which the dual-store reconcile merges back.
+    expect(JSON.parse(await value(A, 'record-v2/x'))).toEqual({
+      id: 'x',
+      updatedAt: 1
+    })
+  })
+
   it('reads plaintext an older build writes once an epoch exists', async () => {
     const [A, B, C] = await setup()
     await kick(A, C)
