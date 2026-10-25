@@ -332,6 +332,20 @@ afterEach(async () => {
 })
 
 describe('epochStore over real Autopass', () => {
+  it('uses the default options for find and ensureEpoch', async () => {
+    const [A] = await setup(['A'])
+    await A.store.add('record/default', 'visible')
+
+    expect(await A.store.find()).toContainEqual({
+      key: 'record/default',
+      value: 'visible',
+      file: null
+    })
+    await expect(A.store.ensureEpoch()).resolves.toMatchObject({
+      rotated: false
+    })
+  })
+
   it('locks a revoked writer out of new entries only', async () => {
     const [A, B, C] = await setup()
     await A.store.add('record/legacy', '{"title":"legacy"}')
