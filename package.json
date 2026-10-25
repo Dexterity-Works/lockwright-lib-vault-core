@@ -9,7 +9,8 @@
     "lint": "eslint .",
     "lint:fix": "eslint --fix .",
     "test": "jest",
-    "test:network": "jest --config jest.network.config.js --runInBand --detectOpenHandles"
+    "test:network": "jest --config jest.network.config.js --runInBand --detectOpenHandles",
+    "test:network:coverage": "jest --config jest.network.config.js --runInBand --coverage --collectCoverageFrom='src/worklet/utils/swarm.js' --collectCoverageFrom='src/worklet/utils/dht.js' --collectCoverageFrom='src/worklet/personalSwarm.js' --collectCoverageFrom='src/worklet/pearpassPairer.js' --collectCoverageFrom='src/worklet/appDeps.js' --collectCoverageFrom='src/worklet/epoch/**/*.js' --coverageDirectory=test-artifacts/coverage"
   },
   "dependencies": {
     "@noble/ciphers": "^2.2.0",
