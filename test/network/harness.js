@@ -265,15 +265,85 @@ export const holdsEpoch = (peer, id) =>
     { label: `${peer.id} holds epoch ${id.slice(0, 8)}` }
   )
 
-/** Wait until `peer` reports itself revoked; resolves its status. */
-export const revokedStatus = (peer) =>
+/**
+ * Wait until `peer` reads under an epoch sealed to exactly `members`, other
+ * than `besides`; resolves its status. Not pinned to one epoch id: a member
+ * that saw the same removal may rotate for it at the same time (5bd7788).
+ */
+export const holdsMembers = (peer, want, { besides = null } = {}) =>
   waitFor(
     async () => {
       const status = await peer.epochStatus()
-      return status.revoked ? status : false
+      return status.canRead &&
+        status.epoch !== null &&
+        status.epoch !== besides &&
+        JSON.stringify(status.members) === JSON.stringify(want)
+        ? status
+        : false
+    },
+    { label: `${peer.id} holds an epoch sealed to ${want.join(', ')}` }
+  )
+
+/**
+ * Wait until every peer in `peers` reads under one epoch sealed to exactly
+ * `want` and none of them owes a rotation (ensureEpoch says current), with
+ * the epoch unchanged across that check; resolves its status. Concurrent
+ * rotations settle in more than one step: the loser of a same-seq race
+ * rotates again to carry its key.
+ */
+export const settledEpoch = (peers, want) =>
+  waitFor(
+    async () => {
+      const read = () => Promise.all(peers.map((p) => p.epochStatus()))
+      const agree = (all) =>
+        all.every(
+          (s) =>
+            s.canRead &&
+            s.epoch !== null &&
+            s.epoch === all[0].epoch &&
+            JSON.stringify(s.members) === JSON.stringify(want)
+        )
+      const before = await read()
+      if (!agree(before)) return false
+      for (const peer of peers) {
+        if ((await peer.ensureEpoch()).reason !== 'current') return false
+      }
+      const after = await read()
+      return agree(after) && after[0].epoch === before[0].epoch
+        ? after[0]
+        : false
+    },
+    {
+      label: `${peers.map((p) => p.id).join(', ')} settle on one epoch sealed to ${want.join(', ')}`
+    }
+  )
+
+/**
+ * Wait until `peer` reports itself revoked, and `where` holds for that
+ * status; resolves it.
+ */
+export const revokedStatus = (peer, where = () => true) =>
+  waitFor(
+    async () => {
+      const status = await peer.epochStatus()
+      return status.revoked && where(status) ? status : false
     },
     { label: `${peer.id} learns it was revoked` }
   )
+
+/**
+ * Wait until `peer`'s epoch status listener got a status that passes
+ * `where`; resolves its index in `net.events`. A polled status can come
+ * before the push, which runs after a debounced reconcile.
+ */
+export const statusPushed = (net, peer, where = () => true) =>
+  waitFor(
+    () => {
+      const i = indexOf(net.events, peer.id, 'epoch.status', where)
+      return i > -1 ? { index: i } : false
+    },
+    { label: `${peer.id} pushes the epoch status` }
+  ).then(({ index }) => index)
 
 /**
  * `peer` holds the row under `key` sealed (the ciphertext does not carry
