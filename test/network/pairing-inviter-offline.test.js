@@ -1,21 +1,16 @@
 import {
   createNetwork,
   indexOf,
+  of,
   pairOrCancel,
   sleep,
   waitFor
 } from './harness.js'
 import { short } from './tracer.js'
 
-// The invite lives in the active vault, so suspending its swarm takes the
-// inviter off the pairing topic. A joiner that starts while the inviter is
-// away cannot be answered; it completes once the inviter is back.
-
-const of = (net, peer, event, where = {}) =>
-  net.tracers[peer].events.filter(
-    (e) =>
-      e.event === event && Object.entries(where).every(([k, v]) => e[k] === v)
-  )
+// The invite lives in the active vault, so suspending it takes the inviter
+// off the pairing topic. A joiner that starts while the inviter is away
+// cannot be answered; it completes once the inviter is back.
 
 const offlineFor = 3000
 
@@ -34,16 +29,27 @@ describe('inviter offline while the joiner starts', () => {
     const code = await A.invite()
     const aVault = short(A.instance.swarm.keyPair.publicKey)
 
-    await A.goOffline()
+    // The production offline path (the app going to the background):
+    // appDeps suspends every Autopass (appDeps.js:209-223), and autopass
+    // suspends blind-pairing, the swarm and the store (autopass
+    // index.js:392-398).
+    A.trace('peer.offline')
+    await A.appDeps.suspendAllInstances()
     expect(A.instance.swarm.suspended).toBe(true)
+    expect(A.instance.pairing.suspended).toBe(true)
     expect(of(net, 'A', 'swarm.suspend', { label: 'vault' })).toHaveLength(1)
 
     const pairing = pairOrCancel(B, code, { timeout: 30000 })
+    // B's candidate has polled: it looked for a reply, found none, and
+    // announced its request, after which it joins the pairing topic as a
+    // server too (blind-pairing index.js:590-602). The late topic.join the
+    // tracer lists when the pairer swarm is created proves nothing.
     await waitFor(
-      () => of(net, 'B', 'topic.join', { label: 'pairer' }).length,
-      {
-        label: 'B pairer joined the pairing topic'
-      }
+      () =>
+        of(net, 'B', 'topic.join', { label: 'pairer', server: true }).some(
+          (e) => !e.late
+        ),
+      { label: 'B announced its pairing request' }
     )
     await sleep(offlineFor)
     // Still waiting: no answer, no live connection to A.
@@ -57,30 +63,26 @@ describe('inviter offline while the joiner starts', () => {
     expect(early.length - closed.length).toBe(0)
     expect(B.vaultId).toBeNull()
 
-    await A.goOnline()
+    A.trace('peer.online')
+    await A.appDeps.resumeAllInstances()
     expect(A.instance.swarm.suspended).toBe(false)
     const result = await pairing
     expect(result).toMatchObject({ paired: true, vaultId: 'shared' })
 
     // net.events is every peer's events in the order they were recorded.
-    const start = indexOf(net.events, 'B', 'pairing.start')
-    const resume = indexOf(
-      net.events,
-      'A',
-      'swarm.resume',
-      (e) => e.label === 'vault'
-    )
-    const paired = indexOf(net.events, 'B', 'peer.paired')
-    const connected = indexOf(
-      net.events,
-      'B',
-      'conn.open',
-      (e) => e.label === 'pairer' && e.remote === aVault
-    )
-    expect(start).toBeGreaterThanOrEqual(0)
-    expect(start).toBeLessThan(resume)
-    expect(resume).toBeLessThan(connected)
-    expect(connected).toBeLessThan(paired)
+    // A took no connection from B's pairer while suspended, and B was
+    // answered only after A came back.
+    const online = indexOf(net.events, 'A', 'peer.online')
+    const bPairer = of(net, 'B', 'swarm.create', { label: 'pairer' })[0].key
+    const fromPairer = net.events
+      .map((e, i) => ({ e, i }))
+      .filter(
+        ({ e }) =>
+          e.peer === 'A' && e.event === 'conn.open' && e.remote === bPairer
+      )
+    expect(fromPairer).not.toHaveLength(0)
+    for (const { i } of fromPairer) expect(i).toBeGreaterThan(online)
+    expect(indexOf(net.events, 'B', 'peer.paired')).toBeGreaterThan(online)
     expect(of(net, 'B', 'peer.paired')).toHaveLength(1)
     expect(of(net, 'B', 'peer.pairTimeout')).toHaveLength(0)
 
