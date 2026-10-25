@@ -4,16 +4,17 @@ import {
   holdsEpoch,
   holdsMembers,
   indexOf,
+  noKeyAfter,
   revokedStatus,
+  sameList,
   sealedFrom,
-  settledEpoch,
+  settledUnaided,
   shareVault,
   waitFor
 } from './harness.js'
 import { short } from './tracer.js'
 
 const ABC = ['device-A', 'device-B', 'device-C']
-const sameList = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 
 // ADR 0014: a removed device "can read a record written by a member whose
 // copy of the roster had not yet shown the removal when it wrote" (the
@@ -83,8 +84,8 @@ describe('revoke while a member is partitioned (ADR 0014)', () => {
       await waitFor(() => D.get('note/b-during'), { label: 'D reads b-during' })
     ).toMatchObject({ text: 'written apart' })
 
-    // A, B and C may each rotate once B's view shows the kick.
-    const agreed = await settledEpoch([A, B, C], ABC)
+    // A, B and C may each rotate once B's view shows the kick, on their own.
+    const agreed = await settledUnaided(net, [A, B, C], ABC)
     expect(agreed.epoch).not.toBe(first.id)
 
     // B's next write is sealed under the agreed epoch: D cannot read it.
@@ -101,6 +102,9 @@ describe('revoke while a member is partitioned (ADR 0014)', () => {
       revoked: true,
       canRead: false
     })
+    // b-during was sealed under the first epoch; nothing above it on D's own
+    // store holds a box for D.
+    await noKeyAfter(D, { lastHeldSeq: first.seq })
 
     // Traces: B reported only the first epoch while apart; D never reported
     // any later epoch as readable (its legacy status before the first epoch
