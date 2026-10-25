@@ -1,13 +1,20 @@
 import {
   converge,
   createNetwork,
+  epochRows,
   holdsEpoch,
+  noKeyAfter,
   revokedStatus,
   sealedFrom,
-  settledEpoch,
-  shareVault
+  settledUnaided,
+  shareVault,
+  waitFor
 } from './harness.js'
-import { short } from './tracer.js'
+
+const AB = ['device-A', 'device-B']
+const ABCD = ['device-A', 'device-B', 'device-C', 'device-D']
+
+const ids = async (peer) => new Set((await epochRows(peer)).map((r) => r.key))
 
 // ADR 0014: "two concurrent rotations both exclude the removed device". Two
 // kicks at once must settle on one epoch sealed to the two who stay.
@@ -19,54 +26,67 @@ describe('two devices kicked at the same time (ADR 0014)', () => {
     net = null
   })
 
-  test('A kicks C while B kicks D; one epoch for A and B, C and D read nothing newer', async () => {
+  test('A kicks C while B, offline, kicks D; one epoch for A and B, C and D read nothing newer', async () => {
     net = await createNetwork({ peers: ['A', 'B', 'C', 'D'] })
     const { A, B, C, D } = net.peers
     await shareVault(net)
 
     const first = await A.ensureEpoch({ start: true })
-    expect(first).toMatchObject({
-      rotated: true,
-      members: ['device-A', 'device-B', 'device-C', 'device-D']
-    })
+    expect(first).toMatchObject({ rotated: true, seq: 1, members: ABCD })
     for (const peer of [B, C, D]) await holdsEpoch(peer, first.id)
     await A.add('note/before', { text: 'everyone' })
     expect(await converge(net.list, 'note/before')).toMatchObject({
       text: 'everyone'
     })
 
-    // Each kick rotates; or finds the latest epoch already current, when a
-    // rotation for both removals (the other kick's, or its own update-driven
-    // one) landed first; or, when the other kick's epoch resolved above its
-    // own twice, gives up with RotationOvertakenError. The next ensure then
-    // judges the epoch that won.
-    const kicks = await Promise.allSettled([
-      A.kick('device-C'),
-      B.kick('device-D')
-    ])
-    const outcomes = kicks.map((k) =>
-      k.status === 'rejected'
-        ? k.reason.name
-        : k.value.rotated
-          ? `rotated seq ${k.value.seq}`
-          : k.value.reason
+    // The race, forced: B is cut off, so neither kicker sees the other's
+    // kick before it rotates. B's removal and record land on its own core.
+    await B.goOffline()
+    const kickC = await A.kick('device-C')
+    expect(kickC).toMatchObject({
+      rotated: true,
+      seq: 2,
+      members: ['device-A', 'device-B', 'device-D']
+    })
+    const kickD = await B.kick('device-D')
+    expect(kickD).toMatchObject({
+      rotated: true,
+      seq: 2,
+      members: ['device-A', 'device-B', 'device-C']
+    })
+    // Every record B wrote apart, and every record A's side wrote before B
+    // came back: written by a member whose roster did not yet show the
+    // other kick (ADR 0014's honest limit). A's side may hold more than A's
+    // kick: D sees C removed and may rotate for it too.
+    const firstKey = `epoch/${first.id}`
+    const apartB = await ids(B)
+    apartB.delete(firstKey)
+    expect([...apartB]).toEqual([`epoch/${kickD.id}`])
+    await waitFor(async () => (await ids(D)).has(`epoch/${kickC.id}`), {
+      label: "D holds A's kick record"
+    })
+    const apartA = await ids(A)
+    apartA.delete(firstKey)
+    await B.goOnline()
+
+    // Both seq 2 records reach A, then the merge.
+    const both = await waitFor(
+      async () => {
+        const two = (await epochRows(A)).filter(
+          ({ key }) =>
+            key === `epoch/${kickC.id}` || key === `epoch/${kickD.id}`
+        )
+        return two.length === 2 && two
+      },
+      { label: 'A holds both seq 2 records' }
     )
-    // "two concurrent rotations both exclude the removed device"
-    for (const [kick, target] of [
-      [kicks[0], 'device-C'],
-      [kicks[1], 'device-D']
-    ]) {
-      if (kick.status === 'rejected') {
-        expect(kick.reason.name).toBe('RotationOvertakenError')
-      } else if (kick.value.rotated) {
-        expect(kick.value.members).not.toContain(target)
-      } else {
-        expect(kick.value.reason).toBe('current')
-      }
-    }
-    expect(kicks.some((k) => k.value?.rotated)).toBe(true)
-    const settled = await settledEpoch([A, B], ['device-A', 'device-B'])
+    expect(both.map(({ record }) => record.seq)).toEqual([2, 2])
+    const settled = await settledUnaided(net, [A, B], AB)
     expect(settled.epoch).not.toBe(first.id)
+    expect(settled.members).toEqual(AB)
+    expect(settled.seq).toBeGreaterThanOrEqual(3)
+    expect((await A.devices()).map((d) => d.id).sort()).toEqual(AB)
+    expect((await B.devices()).map((d) => d.id).sort()).toEqual(AB)
 
     await A.add('note/after-a', { text: 'from A, members only' })
     await B.add('note/after-b', { text: 'from B, members only' })
@@ -75,44 +95,42 @@ describe('two devices kicked at the same time (ADR 0014)', () => {
         text: expect.stringContaining('members only')
       })
     }
-    // A kicker that had not yet seen the other kick seals its epoch to that
-    // other device (ADR 0014's honest limit), so a kicked device may read an
-    // epoch that lists it. It never reads one that leaves it out.
-    const sealedToKicked = []
-    for (const peer of [C, D]) {
+    // A kicked device may hold a key of an epoch the other kicker wrote
+    // before it saw this kick, and nothing else above the first: checked on
+    // its own epoch rows, every one of them.
+    const report = []
+    for (const [peer, allowed] of [
+      [C, apartB],
+      [D, apartA]
+    ]) {
       expect(
         await revokedStatus(peer, (s) => s.epoch === settled.epoch)
       ).toMatchObject({ canRead: false })
       await sealedFrom(peer, 'note/after-a', 'members only')
       await sealedFrom(peer, 'note/after-b', 'members only')
       expect(await peer.get('note/before')).toMatchObject({ text: 'everyone' })
-      const readable = net.tracers[peer.id].events.filter(
-        (e) =>
-          e.event === 'epoch.status' &&
-          e.epoch !== null &&
-          e.epoch !== short(first.id) &&
-          e.canRead
-      )
-      expect(
-        readable.filter((e) => !e.members.includes(peer.deviceId))
-      ).toEqual([])
-      sealedToKicked.push(
-        `${peer.id}:${new Set(readable.map((e) => e.epoch)).size}`
-      )
+      const seen = await noKeyAfter(peer, {
+        lastHeldSeq: first.seq,
+        allow: (record) => allowed.has(`epoch/${record.id}`)
+      })
+      report.push(`${peer.id}:${seen.allowed}/${seen.above}`)
     }
-    expect((await A.devices()).map((d) => d.id).sort()).toEqual([
-      'device-A',
-      'device-B'
-    ])
+    // C reads B's kick record and nothing else B or A wrote.
+    expect(report[0]).toMatch(/^C:1\//)
 
-    // The first epoch plus at least one per kick; extra records are the
-    // same-seq race resolving. Reported per run.
-    const records = await A.list('epoch/')
+    // The first epoch, two at seq 2, and the merge; more records are D
+    // rotating for C's removal, or the loser of a same-seq race rotating
+    // again. Reported per run.
+    const records = await epochRows(A)
+    const bySeq = {}
+    for (const { record } of records)
+      bySeq[record.seq] = (bySeq[record.seq] ?? 0) + 1
     // eslint-disable-next-line no-console
     console.log(
-      `epoch records: ${records.length} (kicks: ${outcomes.join(', ')}; ` +
-        `later epochs a kicked device read: ${sealedToKicked.join(' ')})`
+      `epoch records: ${records.length} (by seq ${JSON.stringify(bySeq)}; ` +
+        `A's side apart: ${apartA.size}; settled seq ${settled.seq}; ` +
+        `listing the kicked device, allowed/above: ${report.join(' ')})`
     )
-    expect(records.length).toBeGreaterThanOrEqual(3)
+    expect(records.length).toBeGreaterThanOrEqual(4)
   })
 })
