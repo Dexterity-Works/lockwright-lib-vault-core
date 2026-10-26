@@ -289,8 +289,8 @@ importers:
         specifier: ^1.7.1
         version: 1.7.2
       udx-native:
-        specifier: ^1.19.2
-        version: 1.21.0(bare-url@2.4.7)
+        specifier: ^1.22.0
+        version: 1.22.0(bare-url@2.4.7)
     devDependencies:
       '@babel/core':
         specifier: ^7.28.4
@@ -3544,8 +3544,8 @@ packages:
     engines: {node: '>=14.17'}
     hasBin: true
 
-  udx-native@1.21.0:
-    resolution: {integrity: sha512-54GMSqSJyc+NLALQLGWpkxQcTYmW/MNU5aYugrv+FR+f2nb7kfUJlstKBiaIM4iYg71b9VSxHrA1g8vBA9HPTw==}
+  udx-native@1.22.0:
+    resolution: {integrity: sha512-JK4/asbQccpYEGsjrafVQQTm2aW9Xw1L6evc3iiH8b7h0WYVGsAVrc6eD2a/DaF748s65LmgD7nx5IQJbkG5Wg==}
     engines: {bare: '>=1.17.4'}
 
   unbox-primitive@1.1.0:
@@ -5922,7 +5922,7 @@ snapshots:
       sodium-universal: 5.0.1(bare-buffer@3.6.2)(bare-events@2.9.1)(bare-url@2.4.7)
       streamx: 2.28.0
       time-ordered-set: 2.0.1
-      udx-native: 1.21.0(bare-url@2.4.7)
+      udx-native: 1.22.0(bare-url@2.4.7)
     transitivePeerDependencies:
       - bare-abort-controller
       - bare-buffer
@@ -8246,7 +8246,7 @@ snapshots:
 
   typescript@6.0.3: {}
 
-  udx-native@1.21.0(bare-url@2.4.7):
+  udx-native@1.22.0(bare-url@2.4.7):
     dependencies:
       b4a: 1.8.1
       bare-events: 2.9.1

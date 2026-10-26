@@ -37,7 +37,7 @@
     "rocksdb-native": "^3.11.4",
     "sodium-native": "^5.0.10",
     "suspendify": "^1.7.1",
-    "udx-native": "^1.19.2"
+    "udx-native": "^1.22.0"
   },
   "devDependencies": {
     "@babel/core": "^7.28.4",
