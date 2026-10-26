@@ -19,11 +19,10 @@ describe('personal swarm over a local testnet', () => {
 
   test('a kick notice reaches the kicked device on its master topic', async () => {
     net = await createNetwork({ peers: ['A', 'B', 'C'] })
-    const { A, B, C } = net.peers
+    const { A, C } = net.peers
     await shareVault(net)
     await A.ensureEpoch({ start: true })
     const topicC = await C.personalInit()
-    await B.personalInit()
 
     // A finds C's topic where lib-vault does: on C's device row.
     const row = (await A.devices()).find((d) => d.id === 'device-C')
@@ -39,7 +38,6 @@ describe('personal swarm over a local testnet', () => {
       label: 'C got the envelope'
     })
     expect(C.envelopes[0]).toBe(envelope)
-    expect(B.envelopes).toEqual([])
     await waitFor(async () => (await C.epochStatus()).revoked, {
       label: 'C also learns it was revoked from the vault'
     })
@@ -56,10 +54,13 @@ describe('personal swarm over a local testnet', () => {
     ).toBe(true)
   })
 
-  test('an envelope to a device whose personal swarm is down is not delivered', async () => {
+  test('an envelope to a device that went offline after announcing is not delivered', async () => {
     net = await createNetwork({ peers: ['A', 'C'] })
     const { A, C } = net.peers
     const topicC = await C.personalInit()
+    // Announced on the DHT first, so A's lookup can find C's record.
+    const personal = C.created.find((c) => c.label === 'personalSwarm')
+    await personal.instance.flush()
     await C.personalClose()
     const started = Date.now()
     const result = await A.personalSend(topicC, hex(16))

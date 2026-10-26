@@ -1,5 +1,6 @@
 import { spawn } from 'child_process'
 import crypto from 'crypto'
+import fs from 'fs'
 import path from 'path'
 
 import { mkdtemp, removeDir } from './tmp.js'
@@ -14,6 +15,7 @@ const root = path.resolve(__dirname, '..', '..')
 const child = path.join(root, 'test', 'network', 'child', 'master-init.mjs')
 const register = path.join(root, 'test', 'network', 'child', 'register.mjs')
 
+const procs = new Set()
 const run = (dir, keys, { killAfterOpeningMs = null } = {}) =>
   new Promise((resolve) => {
     const proc = spawn(
@@ -32,6 +34,7 @@ const run = (dir, keys, { killAfterOpeningMs = null } = {}) =>
         stdio: ['ignore', 'pipe', 'pipe']
       }
     )
+    procs.add(proc)
     let out = ''
     let killed = false
     proc.stdout.on('data', (chunk) => {
@@ -44,7 +47,11 @@ const run = (dir, keys, { killAfterOpeningMs = null } = {}) =>
     proc.stderr.on('data', (chunk) => {
       out += chunk
     })
-    proc.on('exit', (code, signal) => resolve({ code, signal, out }))
+    // 'close', not 'exit': stdio can still hold the last lines at 'exit'.
+    proc.on('close', (code, signal) => {
+      procs.delete(proc)
+      resolve({ code, signal, out })
+    })
   })
 
 const keys = () => ({
@@ -52,8 +59,22 @@ const keys = () => ({
   hashedPassword: crypto.randomBytes(32).toString('hex')
 })
 
+const files = (dir) =>
+  fs
+    .readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((e) => e.isFile()).length
+
 describe('master vault killed during its first open (Finding 4)', () => {
   const dirs = []
+  // Where each kill landed: inside masterVaultInit, inside vaultsAdd, or
+  // after the open; and whether the store had files by then.
+  const landed = []
+  afterEach(() => {
+    // A child that hung (a reopen stuck on a lock) must not outlive its test
+    // or see its storage dir removed under it.
+    for (const proc of procs) proc.kill('SIGKILL')
+    procs.clear()
+  })
   afterAll(() => dirs.forEach((d) => removeDir(d)))
 
   test.each([0, 2, 5, 10, 20, 40, 60, 80, 120, 160])(
@@ -63,16 +84,29 @@ describe('master vault killed during its first open (Finding 4)', () => {
       dirs.push(dir)
       const k = keys()
       const first = await run(dir, k, { killAfterOpeningMs: ms })
-      // The open takes ~200 ms, so up to 80 ms the kill must land inside it.
-      if (ms <= 80) {
-        expect(first.signal).toBe('SIGKILL')
-        expect(first.out).not.toContain('opened')
-      }
+      landed.push({
+        ms,
+        phase: first.out.includes('opened')
+          ? 'after'
+          : first.out.includes('inited')
+            ? 'vaultsAdd'
+            : 'masterVaultInit',
+        files: files(dir)
+      })
       const reopened = await run(dir, k)
       expect(reopened.out.trim().split('\n').pop()).toBe('opened')
     },
     60000
   )
+
+  test('the kills covered the open, not only an empty or finished store', () => {
+    // Host speed decides which delays land where; the run is only worth
+    // something if several kills interrupted an open that had written files.
+    const inside = landed.filter((l) => l.phase !== 'after' && l.files > 0)
+    expect(landed).toHaveLength(10)
+    expect(inside.length).toBeGreaterThanOrEqual(3)
+    expect(inside.some((l) => l.phase === 'masterVaultInit')).toBe(true)
+  })
 
   test('reopening with a different hashedPassword fails with "failed to rotate" (the lab resume bug)', async () => {
     const dir = mkdtemp('masterkill')

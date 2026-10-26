@@ -51,6 +51,7 @@ export class Peer {
     this.started = false
     /** Every instance the seam handed out, so a failed init still closes. */
     this.created = []
+    this.destroying = []
   }
 
   async start() {
@@ -61,6 +62,16 @@ export class Peer {
       relayThrough: this.relayThrough,
       onCreate: (label, instance) => {
         this.created.push({ label, instance })
+        // personalSend destroys its swarm without awaiting it; stop() waits
+        // for that destroy, or its socket outlives the test.
+        if (label === 'personalSend') {
+          const destroy = instance.destroy.bind(instance)
+          instance.destroy = (...args) => {
+            const done = destroy(...args)
+            this.destroying.push(done)
+            return done
+          }
+        }
         // appDeps builds the master vault and the active vault alike; the
         // master vault is the only one built while start() runs.
         const traced =
@@ -346,6 +357,8 @@ export class Peer {
       }
     }
     this.created = []
+    await Promise.allSettled(this.destroying)
+    this.destroying = []
     this.unsubscribeEnvelope?.()
     this.unsubscribeEnvelope = null
     this.appDeps.setEpochStatusListener(null)
