@@ -264,6 +264,9 @@ importers:
       framed-stream:
         specifier: ^1.0.1
         version: 1.0.1
+      hypercore:
+        specifier: ^11.35.1
+        version: 11.35.1(bare-buffer@3.6.2)(bare-url@2.4.7)
       hypercore-id-encoding:
         specifier: ^1.3.0
         version: 1.3.0

@@ -8,6 +8,25 @@ import { receiveFileStream } from '../utils/recieveFileStream.js'
 import { sendFileStream } from '../utils/sendFileStream.js'
 import { API, API_BY_VALUE } from '../worklet/api.js'
 
+/**
+ * Epoch status of the active vault, returned by activeVaultGetEpochStatus
+ * and pushed as the payload of the 'epoch-status' event.
+ * @typedef {{
+ *   vaultId: string | null,
+ *   epoch: string | null,
+ *   seq: number,
+ *   legacy: boolean,
+ *   canRead: boolean,
+ *   revoked: boolean,
+ *   members: string[],
+ *   uncovered: string[]
+ * }} EpochStatus
+ */
+
+/**
+ * @fires PearpassVaultClient#epoch-status with an EpochStatus whenever the
+ *   active vault's epoch status changes.
+ */
 export class PearpassVaultClient extends EventEmitter {
   /**
    * @param {*} ipc - bare-rpc compatible IPC stream
@@ -64,6 +83,22 @@ export class PearpassVaultClient extends EventEmitter {
               'Failed to parse personal-swarm-envelope payload',
               err
             )
+          }
+
+          break
+
+        case API.ON_EPOCH_STATUS:
+          try {
+            const raw = req.data
+            const text =
+              typeof raw === 'string'
+                ? raw
+                : raw
+                  ? b4a.toString(raw, 'utf8')
+                  : '{}'
+            this.emit('epoch-status', JSON.parse(text))
+          } catch (err) {
+            this._logger.error('Failed to parse epoch-status payload', err)
           }
 
           break
@@ -363,10 +398,13 @@ export class PearpassVaultClient extends EventEmitter {
   }
 
   /**
-   * Schema-2 migrate status for the active vault (boot gate).
+   * Schema-2 migrate status for the active vault (boot gate). `deferred`:
+   * waiting until this device can write the vault epoch, with `error`
+   * 'epoch-key-pending' so a gate on `error && !inProgress` opens at once.
    * @returns {Promise<{
    *   ready: boolean,
    *   inProgress: boolean,
+   *   deferred: boolean,
    *   migratedToSchema: number|null,
    *   error: string|null,
    *   lastResult: object|null
@@ -508,6 +546,30 @@ export class PearpassVaultClient extends EventEmitter {
     return this._handleRequest({
       command: API.ACTIVE_VAULT_REMOVE_WRITER,
       data: { writerKey }
+    })
+  }
+
+  /**
+   * Rotates the active vault's epoch key when the roster changed. With
+   * `start`, creates the first epoch of a legacy plaintext vault.
+   * @param {{ start?: boolean }} [options]
+   * @returns {Promise<{ rotated: boolean, reason?: string, id?: string, seq?: number, members?: string[], uncovered: string[] }>}
+   */
+  async activeVaultEnsureEpoch({ start = false } = {}) {
+    return this._handleRequest({
+      command: API.ACTIVE_VAULT_ENSURE_EPOCH,
+      data: { start }
+    })
+  }
+
+  /**
+   * The active vault's epoch status. The same object is pushed as the
+   * 'epoch-status' event when it changes.
+   * @returns {Promise<EpochStatus>}
+   */
+  async activeVaultGetEpochStatus() {
+    return this._handleRequest({
+      command: API.ACTIVE_VAULT_GET_EPOCH_STATUS
     })
   }
 
