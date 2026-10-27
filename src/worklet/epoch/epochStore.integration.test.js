@@ -332,6 +332,20 @@ afterEach(async () => {
 })
 
 describe('epochStore over real Autopass', () => {
+  it('uses the default options for find and ensureEpoch', async () => {
+    const [A] = await setup(['A'])
+    await A.store.add('record/default', 'visible')
+
+    expect(await A.store.find()).toContainEqual({
+      key: 'record/default',
+      value: 'visible',
+      file: null
+    })
+    await expect(A.store.ensureEpoch()).resolves.toMatchObject({
+      rotated: false
+    })
+  })
+
   it('locks a revoked writer out of new entries only', async () => {
     const [A, B, C] = await setup()
     await A.store.add('record/legacy', '{"title":"legacy"}')
@@ -2007,6 +2021,185 @@ describe('epochStore over real Autopass', () => {
     expect(await keys({})).toEqual(['record/1', 'record/3', 'record/5'])
   })
 
+  it('never seals to a kicked device when the view moves during a refresh', async () => {
+    const [A, B, C] = await setup()
+    await A.store.ensureEpoch({ start: true })
+    await indexed(A, B, C)
+    await A.instance.removeWriter(C.instance.writerKey)
+    await A.store.remove('device/C')
+    await A.store.ensureEpoch({ start: true })
+    await A.store.add('record/during', 'secret')
+
+    // B reads its roster before the kick lands and the epoch rows after it.
+    const { system } = B.instance.base
+    const get = system.get.bind(system)
+    let torn = true
+    system.get = async (...args) => {
+      const out = await get(...args)
+      if (torn) {
+        torn = false
+        await sync(A, B)
+      }
+      return out
+    }
+    const result = await B.store.ensureEpoch({ start: false })
+    system.get = get
+    await sync(A, B, C)
+
+    expect(result.members ?? []).not.toContain('C')
+    expect((await B.store.status()).members).not.toContain('C')
+    expect(await C.store.get('record/during')).toBeNull()
+  })
+
+  it('starts an owed epoch before a write instead of writing plaintext', async () => {
+    const [A, B, C] = await setup()
+    await sync(A, B, C)
+    await A.instance.removeWriter(C.instance.writerKey)
+    await A.store.remove('device/C')
+    const add = A.instance.add.bind(A.instance)
+    let fail = true
+    A.instance.add = async (key, ...rest) => {
+      if (fail && key.startsWith('epoch/')) {
+        fail = false
+        throw new Error('append failed')
+      }
+      return add(key, ...rest)
+    }
+    await expect(A.store.ensureEpoch({ start: true })).rejects.toThrow(
+      'append failed'
+    )
+
+    await A.store.add('record/after', 'secret')
+    await sync(A, B, C)
+
+    expect((await A.store.status()).legacy).toBe(false)
+    expect((await rawEnvelope(A, 'record/after')).$enc).toBe(1)
+    expect(await value(B, 'record/after')).toBe('secret')
+    expect(await C.store.get('record/after')).toBeNull()
+  })
+
+  it('refuses a plaintext write while an owed start cannot run', async () => {
+    const [A] = await setup(['A'])
+    await A.instance.base.local.setUserData(
+      'lockwright/epoch-start-owed',
+      Buffer.from('1')
+    )
+    const store = createEpochStore({
+      instance: A.instance,
+      getPersonalKeyPair: async () => A.keyPair
+    })
+    Object.defineProperty(A.instance.base, 'writable', {
+      value: false,
+      configurable: true
+    })
+
+    await expect(store.add('record/r', 'v')).rejects.toBeInstanceOf(
+      EpochRotationPendingError
+    )
+    expect(await A.instance.get('record/r')).toBeNull()
+  })
+
+  it('never seals to a kicked device when the view moves before its update event', async () => {
+    const [A, B, C] = await setup()
+    await A.store.ensureEpoch({ start: true })
+    await indexed(A, B, C)
+    await A.instance.removeWriter(C.instance.writerKey)
+    await A.store.remove('device/C')
+    await A.store.ensureEpoch({ start: true })
+    await A.store.add('record/during', 'secret')
+
+    // Autobase flushes the view inside its drain and emits 'update' only
+    // afterwards: the kick lands in B's view with no event in the window.
+    const { system } = B.instance.base
+    const get = system.get.bind(system)
+    const emit = B.instance.emit.bind(B.instance)
+    const held = []
+    let torn = true
+    system.get = async (...args) => {
+      const out = await get(...args)
+      if (torn) {
+        torn = false
+        B.instance.emit = (name, ...rest) => {
+          if (name !== 'update') return emit(name, ...rest)
+          held.push(rest)
+          return true
+        }
+        await sync(A, B)
+        B.instance.emit = emit
+      }
+      return out
+    }
+    const result = await B.store.ensureEpoch({ start: false })
+    system.get = get
+    for (const args of held) emit('update', ...args)
+    await sync(A, B, C)
+
+    expect(result.members ?? []).not.toContain('C')
+    expect(await C.store.get('record/during')).toBeNull()
+  })
+
+  it('refuses a plaintext write while the owed start cannot be read', async () => {
+    const [A] = await setup(['A'])
+    const { local } = A.instance.base
+    const getUserData = local.getUserData.bind(local)
+    local.getUserData = async (key) => {
+      if (key === 'lockwright/epoch-start-owed') throw new Error('disk busy')
+      return getUserData(key)
+    }
+
+    await expect(A.store.add('record/r', 'v')).rejects.toBeInstanceOf(
+      EpochRotationPendingError
+    )
+    expect(await A.instance.get('record/r')).toBeNull()
+
+    local.getUserData = getUserData
+    await A.store.add('record/r', 'v')
+    expect((await A.instance.get('record/r')).value).toBe('v')
+  })
+
+  it('refuses a write but still reads while the view never holds still', async () => {
+    const [A] = await setup(['A'])
+    await A.store.ensureEpoch({ start: true })
+    await A.store.add('record/r', 'v')
+    const { system } = A.instance.base
+    const get = system.get.bind(system)
+    system.get = async (...args) => {
+      A.instance.emit('update')
+      return get(...args)
+    }
+
+    expect(await value(A, 'record/r')).toBe('v')
+    await expect(A.store.add('record/s', 'w')).rejects.toThrow(
+      'the vault view kept moving'
+    )
+    expect(await A.instance.get('record/s')).toBeNull()
+
+    system.get = get
+    await A.store.add('record/s', 'w')
+    expect(await value(A, 'record/s')).toBe('w')
+  })
+
+  it('refreshes once to read a row whose key landed after the read began', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    await A.store.ensureEpoch({ start: true })
+    await sync(A, B)
+    await B.store.status()
+    await addDevice(A, await strayRow(A, 'E'))
+    const { id: next } = await A.store.ensureEpoch()
+    await A.store.add('record/late', 'secret')
+    expect((await rawEnvelope(A, 'record/late')).e).toBe(next)
+
+    // The row and the epoch that seals it arrive after B's read checked
+    // that its store was fresh.
+    const get = B.instance.get.bind(B.instance)
+    B.instance.get = async (key) => {
+      B.instance.get = get
+      await sync(A, B)
+      return get(key)
+    }
+    expect(await value(B, 'record/late')).toBe('secret')
+  })
+
   it('refreshes at most once per find while updates keep landing', async () => {
     const [A] = await setup(['A'])
     await A.store.ensureEpoch({ start: true })
@@ -2159,6 +2352,29 @@ describe('epochStore over real Autopass', () => {
       EpochRotationPendingError
     )
     expect(await B.instance.get('record/s')).toBeNull()
+  })
+
+  it('treats an envelope of an unknown version as unreadable, not as a value', async () => {
+    const [A] = await setup(['A'])
+    await A.store.ensureEpoch({ start: true })
+    const later = JSON.stringify({
+      $enc: 2,
+      e: 'ff'.repeat(16),
+      n: 'AA==',
+      c: 'AA=='
+    })
+    await A.instance.add('record/next', later)
+    const unreadable = []
+
+    expect(await A.store.get('record/next')).toBeNull()
+    expect(
+      await A.store.find({
+        gte: { key: 'record/' },
+        lt: { key: 'record0' },
+        onUnreadable: (key) => unreadable.push(key)
+      })
+    ).toEqual([])
+    expect(unreadable).toEqual(['record/next'])
   })
 
   it('reports each row find cannot read to onUnreadable', async () => {
@@ -2491,6 +2707,51 @@ describe('epochStore over real Autopass', () => {
     expect((await A.store.status()).members).toEqual(['A', 'B'])
     expect(await value(B, 'record/2')).toBe('v2')
     expect(await value(P, 'record/2')).toBeNull()
+  })
+
+  it('shows an older build no plaintext of a sealed value or file', async () => {
+    const [A, B, O] = await setup()
+    await A.store.ensureEpoch({ start: true })
+    const secret = 'hunter2-sealed'
+    await A.store.add(
+      'record-v2/s',
+      JSON.stringify({ id: 's', data: { password: secret } }),
+      Buffer.from(`file ${secret}`)
+    )
+    await sync(A, B, O)
+
+    // An older build reads straight from Autopass.
+    const raw = await O.instance.get('record-v2/s')
+    expect(raw.value).not.toContain(secret)
+    expect(JSON.parse(raw.value).$enc).toBe(1)
+    expect(raw.file.length).toBeGreaterThan(0)
+    expect(raw.file.includes(secret)).toBe(false)
+    const current = await B.store.get('record-v2/s')
+    expect(JSON.parse(current.value).data).toEqual({ password: secret })
+    expect(current.file.toString()).toBe(`file ${secret}`)
+  })
+
+  it("reads an envelope an older build's merge added plaintext to as its sealed value", async () => {
+    const [A] = await setup(['A'])
+    await A.store.ensureEpoch({ start: true })
+    await A.store.add('record-v2/x', JSON.stringify({ id: 'x', updatedAt: 1 }))
+    // An older build's dual-store merge spreads the envelope it cannot read
+    // into a v2 record and writes it back plaintext.
+    const merged = {
+      ...(await rawEnvelope(A, 'record-v2/x')),
+      id: 'x',
+      schema: 2,
+      updatedAt: 2,
+      data: { password: 'typed on the old build' }
+    }
+    await A.instance.add('record-v2/x', JSON.stringify(merged))
+
+    // The new build reads the sealed value; the old build's edit lives on in
+    // its plaintext v1 twin, which the dual-store reconcile merges back.
+    expect(JSON.parse(await value(A, 'record-v2/x'))).toEqual({
+      id: 'x',
+      updatedAt: 1
+    })
   })
 
   it('reads plaintext an older build writes once an epoch exists', async () => {

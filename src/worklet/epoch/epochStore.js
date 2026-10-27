@@ -13,7 +13,6 @@ import {
   decryptValue,
   encryptValue,
   generateEpochKey,
-  isEnvelope,
   openRing,
   opensCheck,
   sealCheck,
@@ -106,6 +105,8 @@ export const createEpochStore = ({
   let updates = 0
   let refreshedAt = -1
   let refreshing = Promise.resolve()
+  // Whether the last refresh read its roster and epoch rows from one view.
+  let viewSettled = true
   let ensuring = null
   /** @type {{ start: boolean, promise: Promise<object> } | null} */
   let queued = null
@@ -234,11 +235,32 @@ export const createEpochStore = ({
     return ok
   }
 
+  const viewVersion = () => {
+    const { view, system } = instance.base
+    return [view?.core, system?.core]
+      .map((core) => `${core?.fork}:${core?.length}`)
+      .join('/')
+  }
+
   const doRefresh = async () => {
-    const startedAt = updates
     const keyPair = await getPersonalKeyPair()
-    const nextRoster = await readRoster()
-    const records = await readPrefix('epoch/')
+    // The roster and the epoch rows must come from one view: a kick applied
+    // between the two reads would pair a roster that still binds the kicked
+    // device with an epoch that already left it out, and a rotation from
+    // that sealed every key to it. Autobase flushes the view and the system
+    // inside one drain and emits 'update' only after it, so the cores'
+    // lengths and forks tell a moved view, not the event count alone.
+    // Reads can use a view that kept moving; writes and rotations cannot
+    // (see settle).
+    let startedAt, nextRoster, records
+    for (let attempt = 1; ; attempt++) {
+      startedAt = updates
+      const before = viewVersion()
+      nextRoster = await readRoster()
+      records = await readPrefix('epoch/')
+      viewSettled = updates === startedAt && viewVersion() === before
+      if (viewSettled || attempt === 5) break
+    }
     const next = resolveEpochs(records, bound(nextRoster), {
       verify: verifyOnce
     })
@@ -307,7 +329,7 @@ export const createEpochStore = ({
     roster = nextRoster
     epochs = next
     legacy = !epochSeen
-    refreshedAt = startedAt
+    refreshedAt = viewSettled ? startedAt : -1
   }
 
   // A failed refresh leaves the store stale, so the next read tries again
@@ -327,6 +349,12 @@ export const createEpochStore = ({
     return refreshing
   }
 
+  // A refresh a write or a rotation can act on.
+  const settle = async () => {
+    await refresh()
+    if (!viewSettled) throw new Error('epochStore: the vault view kept moving')
+  }
+
   // Already fresh: another caller's refresh failing does not make this
   // read fail.
   const ensureFresh = () =>
@@ -335,8 +363,19 @@ export const createEpochStore = ({
   // Throws EpochKeyUnavailableError / EpochDecryptError for unreadable values.
   // `pass` is shared by every row of one get or find call, so the call
   // refreshes at most once however many rows it cannot read.
+  // Any `$enc`, not only version 1: a later build's envelope is unreadable
+  // here, not a plaintext value to hand out or merge over.
+  const isSealed = (value) => {
+    try {
+      const parsed = typeof value === 'string' ? JSON.parse(value) : value
+      return !!parsed && typeof parsed === 'object' && '$enc' in parsed
+    } catch {
+      return false
+    }
+  }
+
   const decodeRecord = async (key, record, pass) => {
-    if (isPlaintextKey(key) || !isEnvelope(record.value)) {
+    if (isPlaintextKey(key) || !isSealed(record.value)) {
       return { value: record.value, file: record.file ?? null }
     }
     try {
@@ -411,7 +450,18 @@ export const createEpochStore = ({
     refuseEpochKey(key)
     // Always re-resolve before a write: a stale epoch would leak the value
     // to a device that was just removed.
-    await refresh()
+    await settle()
+    // An owed start is a kick or leave whose first rotation failed: the
+    // removed device must not read this write in plaintext.
+    if (legacy && !isPlaintextKey(key)) {
+      const owed = await readStartOwed()
+      // Unread: nobody knows whether a removal is waiting on the start.
+      if (owed === OWED_UNREAD) throw new EpochRotationPendingError()
+      if (owed === true) {
+        await ensureEpoch({ start: true })
+        if (legacy) throw new EpochRotationPendingError()
+      }
+    }
     if (isPlaintextKey(key) || legacy) {
       return instance.add(key, signRow(key, value), file)
     }
@@ -428,6 +478,8 @@ export const createEpochStore = ({
           // Whoever won may have left latest current: judge it below.
           if (!(error instanceof RotationOvertakenError)) throw error
         }
+        // The rotation's own refresh may have read a moving view.
+        await settle()
       }
       if (isStale()) throw new EpochRotationPendingError()
     }
@@ -660,8 +712,8 @@ export const createEpochStore = ({
   }
 
   const doEnsureEpoch = async ({ start = false } = {}, retried = false) => {
-    await refresh()
-    if (await resignMyRows()) await refresh()
+    await settle()
+    if (await resignMyRows()) await settle()
     const keyPair = await getPersonalKeyPair()
     const { sealable, uncovered } = coverage()
     const skip = (reason) => ({ rotated: false, reason, uncovered })
