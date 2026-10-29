@@ -529,6 +529,35 @@ describe('appDeps module functions (excluding encryption)', () => {
       )
     })
 
+    test('masterVaultInitWithNewBlindEncryption passes the overridden bootstrap and reports the instance', async () => {
+      const onCreate = jest.fn()
+      const bootstrap = [{ host: '127.0.0.1', port: 49737 }]
+      setNetworkOverrides({ bootstrap, relayThrough: null, onCreate })
+      try {
+        await appDeps.setStoragePath('/home/testuser/vaultdata')
+        Autopass.mockClear()
+        await appDeps.masterVaultInitWithNewBlindEncryption({
+          encryptionKey: 'key',
+          newHashedPassword: 'new',
+          currentHashedPassword: 'old'
+        })
+      } finally {
+        setNetworkOverrides(null)
+      }
+
+      const [, options] = Autopass.mock.calls[0]
+      expect(options).toEqual({
+        encryptionKey: expect.anything(),
+        blindEncryption: expect.anything(),
+        relayThrough: null,
+        bootstrap
+      })
+      expect(onCreate).toHaveBeenCalledWith(
+        'autopass',
+        appDeps.getVaultsInstance()
+      )
+    })
+
     test('closeVaultsInstance resets vaultsInitialized to false', async () => {
       await appDeps.setStoragePath('/home/testuser/vaultdata')
       await appDeps.masterVaultInit({
