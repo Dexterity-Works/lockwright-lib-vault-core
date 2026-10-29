@@ -51,6 +51,7 @@ export class Peer {
     this.started = false
     /** Every instance the seam handed out, so a failed init still closes. */
     this.created = []
+    this.destroying = []
   }
 
   async start() {
@@ -61,6 +62,16 @@ export class Peer {
       relayThrough: this.relayThrough,
       onCreate: (label, instance) => {
         this.created.push({ label, instance })
+        // personalSend destroys its swarm without awaiting it; stop() waits
+        // for that destroy, or its socket outlives the test.
+        if (label === 'personalSend') {
+          const destroy = instance.destroy.bind(instance)
+          instance.destroy = (...args) => {
+            const done = destroy(...args)
+            this.destroying.push(done)
+            return done
+          }
+        }
         // appDeps builds the master vault and the active vault alike; the
         // master vault is the only one built while start() runs.
         const traced =
@@ -232,6 +243,40 @@ export class Peer {
     return this.appDeps.activeVaultEnsureEpoch({ start: true })
   }
 
+  /** Start this device's personal swarm (its master topic) and collect envelopes. */
+  async personalInit() {
+    const ps = this.modules.personalSwarm
+    this.envelopes ??= []
+    if (!this.unsubscribeEnvelope) {
+      this.unsubscribeEnvelope = ps.personalSwarmOnEnvelope((hex) => {
+        this.envelopes.push(hex)
+        this.trace('personal.envelope', { bytes: hex.length / 2 })
+      })
+    }
+    const { topic } = await ps.personalSwarmInit()
+    this.trace('personal.init', { topic: topic.slice(0, 8) })
+    return topic
+  }
+
+  async personalClose() {
+    this.trace('personal.close')
+    await this.modules.personalSwarm.personalSwarmClose()
+  }
+
+  /** personalSwarmSend: one framed envelope to a device's master topic. */
+  async personalSend(topicHex, envelopeHex) {
+    const result = await this.modules.personalSwarm.personalSwarmSend(
+      topicHex,
+      envelopeHex
+    )
+    this.trace('personal.send', {
+      topic: String(topicHex).slice(0, 8),
+      ok: result.ok,
+      reason: result.reason ?? null
+    })
+    return result
+  }
+
   ensureEpoch({ start = false } = {}) {
     return this.appDeps.activeVaultEnsureEpoch({ start })
   }
@@ -370,6 +415,10 @@ export class Peer {
       }
     }
     this.created = []
+    await Promise.allSettled(this.destroying)
+    this.destroying = []
+    this.unsubscribeEnvelope?.()
+    this.unsubscribeEnvelope = null
     this.appDeps.setEpochStatusListener(null)
     this.network.setNetworkOverrides(null)
     this.tracer?.close()

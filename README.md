@@ -15,6 +15,7 @@ Community fork of PearPass (Apache 2.0). Not affiliated with or endorsed by Teth
 - [Features](#features)
 - [Install](#install)
 - [Usage Examples](#usage-examples)
+- [Revoking a device](#revoking-a-device)
 - [Dependencies](#dependencies)
 - [Related Projects](#related-projects)
 - [License](#license)
@@ -109,6 +110,35 @@ console.log(githubPassword);
 // Close connections when done
 await client.closeAllInstances();
 ```
+
+## Revoking a device
+
+A vault's records are sealed under per-epoch keys (ADR 0014 in the Lockwright superproject), so a device removed from the roster cannot read what members write after the key rotates.
+
+- Each epoch has a random 32-byte key. Once a vault has an epoch, every value and attached file is sealed with `secretbox` under the latest epoch's key, except `vault`, `vault-ext`, `device/*` and `epoch/*`, which stay plaintext.
+- The key reaches each roster device in a signed `epoch/<id>` record, boxed to the Curve25519 form of the device's `masterTopic`. A roster row counts only when its writer signed it for this vault and is still a writer.
+- A vault with no epoch record stays plaintext until its first roster shrink.
+
+```javascript
+// lib-vault's kickDevice does all of this. In a vault with no epoch yet,
+// start one while the device is still a member, so that any member can
+// rotate past the removal if this device stops before the rotation:
+const status = await client.activeVaultGetEpochStatus()
+if (status.legacy) await client.activeVaultEnsureEpoch({ start: true })
+// ...remove the device's writer (activeVaultRemoveWriter) and its rows...
+const result = await client.activeVaultEnsureEpoch({ start: true })
+// { rotated: true, id, seq, members, uncovered }
+// or { rotated: false, reason, uncovered }, reason one of
+// 'current', 'pending', 'legacy', 'not-writable', 'self-not-in-roster'
+
+// status: { vaultId, epoch, seq, legacy, canRead, revoked, members, uncovered }
+
+client.on('epoch-status', (status) => {
+  // pushed when the active vault's status changes
+})
+```
+
+What revoking does not do: the removed device keeps everything it synced before the rotation. It still replicates the vault and sees the roster, record keys, timestamps and ciphertext sizes. It can read a record written by a member whose copy of the roster had not yet shown the removal. Before its removal lands it can add another writer, which stays a member until it is removed too. Devices on builds without epoch keys write plaintext until they update.
 
 ## Dependencies
 

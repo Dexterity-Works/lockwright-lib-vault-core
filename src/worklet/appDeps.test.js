@@ -588,6 +588,46 @@ describe('appDeps module functions (excluding encryption)', () => {
       )
     })
 
+    test('a vault switch during a save writes nothing into the new vault', async () => {
+      await appDeps.initActiveVaultInstance({
+        id: 'vault1',
+        encryptionKey: 'key'
+      })
+      const first = appDeps.getActiveVaultInstance()
+      const { rows: firstRows } = useMemoryVault(first)
+      const originalAdd = first.add
+      let releaseFirstWrite
+      const firstWriteGate = new Promise((resolve) => {
+        releaseFirstWrite = resolve
+      })
+      first.add = jest.fn(async (...args) => {
+        await originalAdd(...args)
+        if (args[0] === 'record-v2/race') await firstWriteGate
+      })
+
+      const data = convertV1RecordToV2({
+        id: 'race',
+        data: { title: 'from vault 1' },
+        updatedAt: 10
+      })
+      const pending = appDeps.activeVaultAdd('record-v2/race', data)
+      await waitFor(() => first.add.mock.calls.length === 1)
+
+      await appDeps.initActiveVaultInstance({
+        id: 'vault2',
+        encryptionKey: 'key'
+      })
+      const second = appDeps.getActiveVaultInstance()
+      const { rows: secondRows } = useMemoryVault(second)
+
+      releaseFirstWrite()
+      await expect(pending).rejects.toThrow('Active vault changed')
+
+      expect(firstRows.has('record-v2/race')).toBe(true)
+      expect(secondRows.has('record/race')).toBe(false)
+      expect(secondRows.has('record-v2/race')).toBe(false)
+    })
+
     test('vaultsGet calls get on vaultsInstance and returns result', async () => {
       const result = await appDeps.vaultsGet('key4')
       expect(result.id).toEqual('vault-id')
@@ -709,6 +749,17 @@ describe('appDeps module functions (excluding encryption)', () => {
       ).toBe(false)
     })
 
+    test('signMessage refuses bytes in the reserved lockwright/ signing domain', async () => {
+      const reserved = Buffer.from('lockwright/epoch-record/v1{"vault":"x"}')
+
+      await expect(
+        appDeps.signMessage(reserved.toString('hex'))
+      ).rejects.toThrow('reserved signing domain')
+      await expect(
+        appDeps.signMessage(Buffer.from('{"type":"kick"}').toString('hex'))
+      ).resolves.toMatch(/^[0-9a-f]{128}$/)
+    })
+
     test('activeVaultGet calls get on activeVaultInstance and returns result', async () => {
       await appDeps.initActiveVaultInstance({
         id: 'vault1',
@@ -761,6 +812,21 @@ describe('appDeps module functions (excluding encryption)', () => {
       put('test2', '3')
       const result = await appDeps.activeVaultList('test')
       expect(result).toEqual([1, 3])
+    })
+
+    test('activeVaultList without a filter includes values and skips JSON null', async () => {
+      await appDeps.initActiveVaultInstance({
+        id: 'vault1',
+        encryptionKey: 'key'
+      })
+      const { put } = useMemoryVault(appDeps.getActiveVaultInstance())
+      put('visible', JSON.stringify({ visible: true }))
+      put('empty', 'null')
+
+      const result = await appDeps.activeVaultList()
+
+      expect(result).toContainEqual({ visible: true })
+      expect(result).not.toContain(null)
     })
   })
 
@@ -1370,6 +1436,50 @@ describe('appDeps module functions (excluding encryption)', () => {
       expect(stored).not.toContain('after')
     })
 
+    test('activeVaultAdd creates the v2 twin when a v1 record has none', async () => {
+      await appDeps.activeVaultAdd('record/new', {
+        id: 'new',
+        type: 'note',
+        data: { title: 'new record' }
+      })
+
+      expect(JSON.parse(vault.rows.get('record-v2/new').value)).toMatchObject({
+        schema: 2,
+        data: { title: 'new record' }
+      })
+    })
+
+    test('activeVaultAdd merges a v1 edit into its existing v2 twin', async () => {
+      await appDeps.activeVaultAdd('record/edited', {
+        id: 'edited',
+        type: 'note',
+        data: { title: 'first' }
+      })
+      await appDeps.activeVaultAdd('record/edited', {
+        id: 'edited',
+        type: 'note',
+        updatedAt: 2,
+        data: { title: 'second' }
+      })
+
+      expect(
+        JSON.parse(vault.rows.get('record-v2/edited').value)
+      ).toMatchObject({
+        updatedAt: 2,
+        data: { title: 'second' }
+      })
+    })
+
+    test('activeVaultEnsureEpoch defaults to leaving a legacy vault alone', async () => {
+      const result = await appDeps.activeVaultEnsureEpoch()
+
+      expect(result.rotated).toBe(false)
+      expect(await appDeps.activeVaultGetEpochStatus()).toMatchObject({
+        legacy: true,
+        epoch: null
+      })
+    })
+
     test('activeVaultAdd signs a device row that names this writer', async () => {
       const writerKey = appDeps.activeVaultGetWriterKey()
       const row = {
@@ -1618,6 +1728,15 @@ describe('appDeps module functions (excluding encryption)', () => {
       expect(
         [...vault.rows.keys()].filter((key) => key.startsWith('record-v2/'))
       ).toEqual([])
+    })
+
+    test('vaultRemove leaves a malformed key outside the record file set', async () => {
+      await appDeps.activeVaultEnsureEpoch({ start: true })
+      vault.put('record-v2/r1/file/', JSON.stringify({ name: 'bad key' }))
+
+      await appDeps.vaultRemove('record/r1')
+
+      expect(vault.rows.has('record-v2/r1/file/')).toBe(true)
     })
 
     test('opens a vault whose migration waits on an epoch rotation', async () => {
@@ -2382,6 +2501,18 @@ describe('appDeps module functions (excluding encryption)', () => {
         expect(await appDeps.activeVaultGet('record-v2/r1')).toMatchObject({
           data: { title: 'kept' }
         })
+      })
+
+      test('keeps a readable record while an unrelated row is unreadable', async () => {
+        const fireUpdate = await seenRecord()
+        vault.put('misc/private', unreadable)
+
+        await fireUpdate()
+
+        expect(await appDeps.activeVaultGet('record/r1')).toMatchObject({
+          data: { title: 'kept' }
+        })
+        expect(vault.rows.get('misc/private').value).toBe(unreadable)
       })
 
       test('does not rebuild a v2 record it cannot read from its v1', async () => {

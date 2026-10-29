@@ -415,6 +415,18 @@ describe('PearpassVaultClient', () => {
     expect(spy).toHaveBeenCalledWith(status)
   })
 
+  it('accepts string and empty epoch-status payloads', () => {
+    const RPC = require('bare-rpc')
+    const handler = RPC.mock.calls.at(-1)[1]
+    const spy = jest.fn()
+    client.on('epoch-status', spy)
+
+    handler({ command: API.ON_EPOCH_STATUS, data: '{"epoch":"e2"}' })
+    handler({ command: API.ON_EPOCH_STATUS })
+
+    expect(spy.mock.calls).toEqual([[{ epoch: 'e2' }], [{}]])
+  })
+
   it('activeVaultList omits otp codes unless asked', async () => {
     const handleSpy = jest.spyOn(client, '_handleRequest').mockResolvedValue([])
 
