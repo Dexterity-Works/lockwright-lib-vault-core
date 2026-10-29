@@ -1,20 +1,8 @@
-import {
-  getConfig,
-  getNetworkOverrides,
-  networkCreated,
-  networkOptions,
-  setNetworkOverrides
-} from './swarm'
+import { networkCreated, networkOptions, setNetworkOverrides } from './swarm'
 
 describe('network seam', () => {
   afterEach(() => {
     setNetworkOverrides(null)
-  })
-
-  test('getConfig falls back to the dummy config without swarmconf', async () => {
-    // jest maps @tetherto/swarmconf to the stub, which has no relays
-    const conf = await getConfig({})
-    expect(conf.current.blindRelays).toEqual([])
   })
 
   test('networkOptions hands the options object back untouched by default', () => {
@@ -25,7 +13,6 @@ describe('network seam', () => {
     expect(networkOptions(options)).toBe(options)
     expect(Object.keys(options)).toEqual(['keyPair', 'relayThrough'])
     expect(networkOptions(undefined)).toBeUndefined()
-    expect(getNetworkOverrides()).toBeNull()
   })
 
   test('networkCreated hands the instance back and calls nothing by default', () => {

@@ -37,8 +37,6 @@ export const setNetworkOverrides = (overrides) => {
   networkOverrides = overrides ?? null
 }
 
-export const getNetworkOverrides = () => networkOverrides
-
 /**
  * @template T
  * @param {T} [options]
