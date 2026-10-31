@@ -88,17 +88,17 @@ Test: `upgrade: switching vaults right after the upgraded vault opens throws an 
 From a separate diagnosis, run in its own worktree (not rerun here):
 - The root cause is a library race, not the re-key code.
   - Autobase 7.28.1 `_close` captures the in-flight apply at `index.js:803`, but closes the apply state at `:817` before awaiting that apply at `:825`.
-  - Releasing the atomic batches (`apply-state.js:723-724`, then `store.js:78`, `:155`) sets `parent.atomized = null` (hypercore `session-state.js:193`).
-  - A snapshot HyperDB requested during the flush (hyperdb `index.js:277`, `:665`, through hyperbee to hypercore `session-state.js:212`) then reads `this.atomized.flushing` at `:130`.
+  - Releasing the atomic batches (`apply-state.js:723-724`, then `store.js:78`, `:154-158`) sets `parent.atomized = null` (hypercore `session-state.js:193`).
+  - A snapshot HyperDB requested during the flush (hyperdb 4.22.3 `index.js:277`, `:665`, through hyperbee to hypercore `session-state.js:212`) then reads `this.atomized.flushing` at `:130`.
 - Any write still applying when the vault closes triggers it, on either build.
   - 031d532 reproduced it too: 14 of 23 times when switching the moment `instance.add` starts, and 5 of 5 with the apply held mid-flush.
   - The re-key build only makes it likely after an upgrade, because each vault re-signs its row in the background on first open.
 - In an app it cannot be caught.
   - Hypercore's `opening.catch(safetyCatch)` re-throws a TypeError as an uncaughtException.
   - The worklet handler (src/worklet/app.js:17-29, same in 031d532) re-throws it, and Bare aborts.
-  - Desktop only logs `[worklet exit]` (electron/main.cjs:485, :612) and does not respawn, leaving a dead vault backend until the app restarts.
+  - Desktop 9427ac8 only logs `[worklet exit]` (`electron/main.cjs:485`, `:612`) and does not respawn, leaving a dead vault backend until the app restarts. The shipped desktop tree was not checked.
   - Mobile likely takes the whole app down (inferred, not run).
-- Fixed upstream in hypercore 11.39.6, which copies `this.atomized` into a local first. Versions 11.35.0 to 11.39.5 have the bug.
+- Fixed upstream in hypercore 11.39.6, which copies `this.atomized` into a local first. Versions 11.27.11 to 11.39.5 have the bug (11.27.10 checked for null inside the loop).
   - With hypercore overridden to 11.39.6, the reproductions went 30 of 30 green, and the unit and network suites passed.
   - The pinned test is expected to fail after that bump: the error stops, and its stack check names 11.35.1.
 
