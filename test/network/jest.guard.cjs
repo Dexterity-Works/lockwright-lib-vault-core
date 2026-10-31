@@ -8,3 +8,6 @@ jest.mock('hyperswarm', () =>
   guard.guardSwarm(jest.requireActual('hyperswarm'))
 )
 jest.mock('udx-native', () => guard.guardUDX(jest.requireActual('udx-native')))
+
+// The released build's own copies, for the mixed-version scenarios.
+require('./release.cjs').mockRelease(jest, guard)

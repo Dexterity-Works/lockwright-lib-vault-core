@@ -115,6 +115,34 @@ Resolution chain: hyperswarm 4.17.0 -> hyperdht 6.33.0 -> dht-rpc 6.27.0 -> udx-
 - `isBogon(ip) = isPrivate || isReserved` (`bogon/index.js:6-22`). Private IPv4: 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12, 192.168/16 (`:28-43`). Reserved IPv4: 0/8, 192.0.0/24, 192.0.2/24, 198.18/15, 198.51.100/24, 203.0.113/24, 224/4, 240/4, 255.255.255.255 (`:49-70`). Strings are accepted (`:109-121`).
 - `hyperdht-address`: `decode(buf) -> { key, nodes }`, `encode(key, nodes)` (`hyperdht-address/index.js:6-15`); `nodes` is an optional `ipv4Address` array behind flag bit 1, so a plain 32-byte key decodes with `nodes: null` (`spec/hyperschema/index.js:15-42`). hyperdht uses `nodes` as `relayAddresses` (`hyperdht/lib/connect.js:42-51`).
 
+## Mixed-version peers
+
+`mixedversion.test.js` runs the released vault-core (031d532, the build the shipped apps run per the superproject's master `packages.lock`) beside the epoch re-key build in one jest process. Loader: `test/network/release.cjs`; driver: `ReleasePeer` in `peer.js`; `createNetwork({ builds: { R: RELEASED } })` and `net.swap(id, build)` in `harness.js`.
+
+- Release tree: a detached worktree at 031d532 with its own `node_modules`, at `../release-031d532` beside this checkout or at `LOCKWRIGHT_RELEASE_DIR`. Make one with `git worktree add --detach ../release-031d532 031d532` and `pnpm install --no-frozen-lockfile` inside it. Without a tree the file skips; a tree at another commit, or without `node_modules`, fails the run.
+- Each side resolves its own dependencies. The released appDeps is required from the release tree, so Node resolution starting at `release-031d532/src/worklet` picks the release tree's `node_modules`; the current build picks this checkout's. That is what a mixed deployment runs: each app ships the copies its own lockfile pins.
+- The two lockfiles pin the same versions of every package except udx-native (diff of the package lists in both `pnpm-lock.yaml`):
+
+| package | current build | release 031d532 |
+|---|---|---|
+| autopass | 3.3.0 | 3.3.0 |
+| autobase | 7.28.1 | 7.28.1 |
+| corestore | 7.12.0 | 7.12.0 |
+| hypercore | 11.35.1 | 11.35.1 |
+| hypercore-storage | 3.2.0 | 3.2.0 |
+| hyperdb | 4.22.3, 6.8.0 | 4.22.3, 6.8.0 |
+| rocksdb-native | 3.17.3 | 3.17.3 |
+| blind-encryption-sodium | 3.0.0 | 3.0.0 |
+| hyperswarm / hyperdht | 4.17.0 / 6.33.0 | 4.17.0 / 6.33.0 |
+| udx-native | 1.21.0 | 1.22.0 |
+
+  The storage and replication stack is the same code on both sides, so a same-directory upgrade or rollback exercises only the vault-core difference. udx-native is transport only (031d532 takes 1.22 for the libudx use-after-free fix); the current build has not merged that bump yet. Both native addons, and two copies each of rocksdb-native and sodium-native, load in the one process from their own paths.
+- No network seam in the released code: `initInstance` builds `new Autopass(store, { encryptionKey, blindEncryption, relayThrough })` and `PearPassPairer` calls `Autopass.pair(store, invite, { relayThrough, blindEncryption })`, both without `bootstrap`, so Autopass builds its Hyperswarm with `bootstrap: null` (`autopass/index.js:26`, `:145`, `:322`) and hyperdht falls back to the public nodes. `mockRelease()` (called from `jest.guard.cjs`) `jest.mock`s the release tree's own files by real path:
+  - its `autopass/index.js` -> a subclass that fills in the testnet bootstrap when `bootstrap` is null or undefined, in the constructor and in `Autopass.pair`, and reports each instance to the peer's `onCreate` hook (the tracer). Each `jest.isolateModules` graph gets its own subclass, so the hook is one peer's; the loader refuses a shared one.
+  - its `hyperswarm`, `hyperdht` and `udx-native` (1.22.0) -> `guard.guardSwarm` / `guardDHT` / `guardUDX`, the same wrappers as the current build's copies. The bootstrap check still runs on what the subclass passes, and any other released builder without a bootstrap (`utils/dht.js` `new DHT()`, `personalSwarm.js`) still breaches. `loadReleaseModules()` checks that the classes it got are the guarded ones.
+  - `@tetherto/swarmconf` maps to `test-stubs/swarmconf.js` for both sides (`blindRelays: []`), so neither side names a relay.
+- `ReleasePeer` wraps the released Autopass instance's `get`, `add` and `remove` once the vault opens: `get('vault-ext')` marks the start of the released `runIncrementalReconcile` (`appDeps.js:411-421` in 031d532), and `add`/`remove` record every row the released code writes. `reconciled(peer)` emits `update` on the instance, which restarts the released 100 ms debounce, and waits for a run that started after it and for every run before it to finish.
+
 ## Env vars and silent public fallbacks
 
 - No `process.env` or `Bare.env` reads in any of these packages (grep over hyperdht, dht-rpc, hyperswarm, autopass, blind-pairing, blind-relay, autobase, corestore, secret-stream, udx-native, bogon, hyperdht-address, protomux). Only `hyperdht/bin.js` parses argv (`:19-23`).

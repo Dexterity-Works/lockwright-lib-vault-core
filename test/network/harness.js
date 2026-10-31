@@ -2,7 +2,8 @@ import fs from 'fs'
 import path from 'path'
 
 import guard from './guard.cjs'
-import { Peer } from './peer.js'
+import { Peer, ReleasePeer } from './peer.js'
+import release from './release.cjs'
 import { startTestnet } from './testnet.js'
 import { writeTimeline } from './timeline.js'
 import { mkdtemp, removeDir } from './tmp.js'
@@ -29,6 +30,61 @@ export const loadIsolatedModules = () => {
   return modules
 }
 
+const releasedClasses = new WeakSet()
+
+/**
+ * The released build's worklet graph (test/network/release.cjs), one private
+ * copy per peer like loadIsolatedModules. It has no network seam, so
+ * `network.setNetworkOverrides` sets the bootstrap and the instance hook on
+ * this peer's copy of the released Autopass instead. A relay override is
+ * not applied: the released code keeps its own relays, `[]` from the
+ * swarmconf stub. No mixed-version scenario starts a relay.
+ */
+export const loadReleaseModules = () => {
+  const tree = release.locateRelease()
+  if (!tree) {
+    throw new Error('no release tree; see DEPS.md, Mixed-version peers')
+  }
+  const at = (file) => path.join(tree.worklet, file)
+  let modules
+  jest.isolateModules(() => {
+    const Autopass = require(tree.paths.autopass)
+    const Hyperswarm = require(tree.paths.hyperswarm)
+    const HyperDHT = require(tree.paths.hyperdht)
+    const UDX = require(tree.paths.udx)
+    if (
+      Hyperswarm.name !== 'GuardedHyperswarm' ||
+      HyperDHT.name !== 'GuardedHyperDHT' ||
+      !UDX.prototype.__networkGuard
+    ) {
+      throw new Error("the released build's networking is not behind the guard")
+    }
+    if (!Autopass.harness || releasedClasses.has(Autopass)) {
+      throw new Error('released peers would share one Autopass hook')
+    }
+    releasedClasses.add(Autopass)
+    const appDeps = require(at('appDeps'))
+    modules = {
+      // The released build has no epoch status to listen to.
+      appDeps: { ...appDeps, setEpochStatusListener: () => {} },
+      network: {
+        setNetworkOverrides: (overrides) => {
+          Autopass.harness.bootstrap = overrides?.bootstrap ?? null
+          Autopass.harness.onCreate = overrides?.onCreate ?? null
+        }
+      },
+      personalSwarm: require(at('personalSwarm')),
+      dht: require(at('utils/dht')),
+      logger: require(at('utils/workletLogger'))
+    }
+  })
+  return modules
+}
+
+/** The build names createNetwork takes; anything else is the current build. */
+export const RELEASED = `release-${release.RELEASE_COMMIT}`
+export const hasRelease = () => release.locateRelease() !== null
+
 // Set by test/network/jest.environment.cjs from jest-circus events.
 const currentTest = () =>
   globalThis.__lockwrightNetworkTest ?? {
@@ -42,10 +98,13 @@ const currentTest = () =>
  * Every peer writes a JSONL trace under `<dir>/traces/`; when the test
  * fails (or `keep` is set) `destroy()` merges them into a timeline under
  * `test-artifacts/<test name>/` and prints its path.
- * @param {{ peers?: string[], size?: number, relayThrough?: any, relayAddresses?: Set<string>, onCreate?: Function, onUpdate?: Function, onEvent?: Function, name?: string }} options
+ * `builds` names the peers that run the released build (`{ A: RELEASED }`);
+ * `swap(id, build)` restarts a peer on the same storage under another build.
+ * @param {{ peers?: string[], builds?: Record<string, string>, size?: number, relayThrough?: any, relayAddresses?: Set<string>, onCreate?: Function, onUpdate?: Function, onEvent?: Function, name?: string }} options
  */
 export const createNetwork = async ({
   peers = ['A', 'B'],
+  builds = {},
   size = 3,
   relayThrough = [],
   relayAddresses = new Set(),
@@ -61,25 +120,33 @@ export const createNetwork = async ({
   const byId = {}
   const list = []
   const tracers = {}
+  // Peers swapped out for another build; their errors still fail teardown.
+  const retired = []
+  // A swapped peer appends to the same trace under a name with its build.
+  const makePeer = (id, build) => {
+    const released = build === RELEASED
+    const tracer = new Tracer({
+      peer: released ? `${id}@${release.RELEASE_COMMIT}` : id,
+      file: path.join(tracesDir, `${id}.jsonl`),
+      relayAddresses,
+      onEvent
+    })
+    tracers[id] = tracer
+    const Driver = released ? ReleasePeer : Peer
+    return new Driver({
+      id,
+      modules: released ? loadReleaseModules() : loadIsolatedModules(),
+      bootstrap: testnet.bootstrap,
+      relayThrough,
+      dir: path.join(dir, id),
+      tracer,
+      onCreate,
+      onUpdate
+    })
+  }
   try {
     for (const id of peers) {
-      const tracer = new Tracer({
-        peer: id,
-        file: path.join(tracesDir, `${id}.jsonl`),
-        relayAddresses,
-        onEvent
-      })
-      tracers[id] = tracer
-      const peer = new Peer({
-        id,
-        modules: loadIsolatedModules(),
-        bootstrap: testnet.bootstrap,
-        relayThrough,
-        dir: path.join(dir, id),
-        tracer,
-        onCreate,
-        onUpdate
-      })
+      const peer = makePeer(id, builds[id])
       await peer.start()
       byId[id] = peer
       list.push(peer)
@@ -100,10 +167,36 @@ export const createNetwork = async ({
     tracers,
     dir,
     traceFiles: () => Object.values(tracers).map((t) => t.file),
+    swap,
     destroy: ({ keep = false } = {}) => {
       destroyed ??= destroy({ keep })
       return destroyed
     }
+  }
+
+  /**
+   * Stop `id` for good, then start it again on the same storage under
+   * `build`, with the same master password and vault keys: the app on that
+   * device upgraded or downgraded. Its vault opens again if it had one.
+   */
+  async function swap(id, build) {
+    const old = byId[id]
+    await old.stop({ keep: true })
+    retired.push(old)
+    const peer = makePeer(id, build)
+    peer.hashedPassword = old.hashedPassword
+    peer.masterKey = old.masterKey
+    // Listed before it starts, so teardown stops it even if start fails.
+    byId[id] = peer
+    list[list.indexOf(old)] = peer
+    peer.trace('peer.swap', { build: build ?? 'current' })
+    await peer.start()
+    if (old.vaultId) {
+      peer.vaultId = old.vaultId
+      peer.encryptionKey = old.encryptionKey
+      await peer.openVault()
+    }
+    return peer
   }
 
   async function destroy({ keep }) {
@@ -125,7 +218,7 @@ export const createNetwork = async ({
     }
     if (!keep) removeDir(dir)
     try {
-      const errors = list.flatMap((peer) => peer.errors)
+      const errors = [...retired, ...list].flatMap((peer) => peer.errors)
       if (errors.length) {
         throw new AggregateError(errors, `teardown: ${errors.length} error(s)`)
       }
@@ -185,6 +278,26 @@ export const waitFor = async (
       : (JSON.stringify(last) ?? String(last))
   throw new Error(
     `waitFor: ${label} not met within ${timeout} ms (last: ${detail})`
+  )
+}
+
+/**
+ * Wait for a released peer to reconcile the vault as it holds it now, and
+ * for every reconcile before that one to finish. The released build
+ * reconciles 100 ms after its Autopass emits `update`, debounced; emitting
+ * it here runs the handler a replicated block runs, with the timer started
+ * now, so the run lists everything the peer holds at this point.
+ * @param {import('./peer.js').ReleasePeer} peer
+ */
+export const reconciled = async (peer) => {
+  const { started } = peer.reconcile
+  peer.trace('peer.reconcile')
+  peer.instance.emit('update')
+  await waitFor(
+    () =>
+      peer.reconcile.started > started &&
+      peer.reconcile.done >= peer.reconcile.started,
+    { interval: 20, label: `${peer.id} reconciled` }
   )
 }
 
