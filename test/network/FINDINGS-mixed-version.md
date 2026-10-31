@@ -20,7 +20,15 @@ What starts an epoch (read from code):
 How a leave reaches a device (read from code):
 - Any device that deletes a vault locally broadcasts a leave, a 031d532 device included (lib-vault 24a94fc `src/api/deleteVaultLocal.js:27-38`; 88c12b1 `:47-52`).
 - On 24a94fc the leave is appended to the sender's outbox (`src/api/broadcastAction.js:63`).
-- It is sent only while sender and receiver are both unlocked and online. It retries every minute for 7 days, then hourly, and the entry is dropped after 30 days (24a94fc `src/api/outbox.js:8-11`, `:68-107`, `:117-128`).
+- It is sent only when a scan runs on the sender after the entry's `nextRetry`, while sender and receiver are both unlocked and online. The retry gap is 1 minute for entries under 7 days old and 1 hour for older ones. Entries are dropped at 30 days (24a94fc `src/api/outbox.js:8-11`, `:68-107`, `:117-125`, `:72`).
+- 24a94fc has no retry timer. `runActionScan` runs only on:
+  - unlock (`src/actions/initializeVaults.js:25`; it starts the personal swarm without awaiting it, so the scan can run before any peer connects),
+  - a broadcast (`src/api/broadcastAction.js:75-76`),
+  - opening a vault (`src/hooks/useVault.js:130`),
+  - an update in the active vault (`src/hooks/useVault.js:124`),
+  - an incoming envelope (`src/instances/index.js:57`),
+  - a listener subscribing to `vault-access-revoked` (`src/instances/index.js:82`),
+  - a `master-update` event (`src/instances/index.js:107`).
 - On the receiver, a leave for a vault that is not active is deferred (24a94fc `leaveVault.js:16-19`). Deferred entries are skipped without counting an attempt, so they stay in the inbox (24a94fc `src/api/inbox.js:125-127`).
 - Opening the vault runs the inbox (24a94fc `src/hooks/useVault.js:130`). The 031d532 handler then handles the leave (24a94fc `leaveVault.js:21-46`, or the return at `:23`), and the entry is removed (24a94fc `inbox.js:129`).
 - On an upgraded device, the same leave starts an epoch instead.
@@ -36,10 +44,11 @@ Upgrading one device at a time is safe only if, until the last device is upgrade
 Any of these starts an epoch that leaves out every device still on 031d532.
 
 To clear queued leaves before upgrading anything (read from code, citations above; no test runs it):
-1. Unlock every device and keep them all online at the same time for over an hour. A minute is enough if no device deleted a vault in the last 7 days.
-2. Then, on each device, open each shared vault.
+1. Unlock every device and keep them all online together. A minute is enough if no device deleted a vault between 7 and 30 days ago; otherwise keep them online for over an hour.
+2. On each device, open each shared vault. That runs its outbox and inbox.
+3. After every device has done step 2, do step 2 again on every device, to handle leaves that arrived during the first pass.
 
-After upgrading a device, leave each vault open for a few seconds before switching vaults or locking (section 1, the TypeError).
+After upgrading a device, leave each vault open for a few seconds before switching vaults or locking (switching is tested; locking and the few seconds are not). Until the apps ship hypercore 11.39.6 or later, also avoid switching vaults or locking right after a save (section 1, the TypeError).
 
 ## 1. Upgrade (031d532 vault reopened by the re-key build on the same storage)
 
@@ -61,20 +70,37 @@ Test: `upgrade: a kick right after the upgrade is refused, then the owed start l
 - A leave in that window stays in the inbox for a retry, and the owed start runs the same way (read from code, 88c12b1 `leaveVault.js:33-34`).
 - Cause: `resignMyRows` adds the row to `resigned` (epochStore.js:704) before its add lands (:706).
 
-### Defect: switching vaults right after the upgraded vault opens throws an uncaught TypeError
+### Defect: closing a vault while a write is applying throws an uncaught TypeError
 
 Test: `upgrade: switching vaults right after the upgraded vault opens throws an uncaught TypeError (bug)`.
+
 - The error: `TypeError: Cannot read properties of null (reading 'flushing')` from hypercore 11.35.1 `lib/session-state.js:130`.
-- Cause, as reproduced:
+- As reproduced here:
   1. The open-time re-sign's `instance.add` on the first vault starts and is not awaited (epochStore.js:882).
-  2. closeActiveVaultInstance closes that vault (appDeps.js:257-259).
-  3. The close goes through Autopass `_close`, Autobase `_close`, `ApplyState._free`, `ViewCore.release`, `Hypercore.close`, and `SessionState.close`/`unref`. That last step sets `parent.atomized = null` while the apply's atomic batch is still flushing.
-  4. A snapshot session in `_updateSnapshotStorage` then reads `this.atomized.flushing` after its await and throws. Line `:129` checks for null; the loop at `:130` does not recheck.
-- The re-sign add never finishes. Its error is caught (epochStore.js:708-714), so that device row stays unsigned.
-- 031d532 writes nothing on open, so it is the upgrade that creates this window.
-- How the test forces it: it holds the re-sign add until the user switches, collects the errors off the real process, and tries up to five times. Without the hold, the window was missed in 1 of 3 file runs. With it, the error came on the first try in each of 5 runs.
-- What the error does inside an app's worklet was not run.
-- Suggested src fix, for the record only: the epoch store keeps the in-flight re-sign promise, and closeActiveVaultInstance and doEnsureEpoch await it. Upstream, hypercore should recheck `this.atomized` after the await.
+  2. closeActiveVaultInstance closes that vault (appDeps.js:257-259) while the add is still applying.
+  3. The re-sign add rejects and is caught (epochStore.js:708-714). The row stays unsigned until that vault next opens, which re-signs it (read from code). That reopens the kick window above.
+- How the test forces it: it holds the re-sign add until the user switches, and collects the errors off the real process. Timing still decides whether the close lands inside the flush:
+  - Without the hold, the error was missed in 1 of 3 runs of the file.
+  - With the hold, it came 8 of 8 times run alone, but was missed in 2 of 4 runs inside the full file.
+  - So the test tries up to five times and expects the error at least once. In every run since, it hit on the first try (judged by run time).
+  - What the error does inside an app's worklet was not run here.
+
+From a separate diagnosis, run in its own worktree (not rerun here):
+- The root cause is a library race, not the re-key code.
+  - Autobase 7.28.1 `_close` captures the in-flight apply at `index.js:803`, but closes the apply state at `:817` before awaiting that apply at `:825`.
+  - Releasing the atomic batches (`apply-state.js:723-724`, then `store.js:78`, `:155`) sets `parent.atomized = null` (hypercore `session-state.js:193`).
+  - A snapshot HyperDB requested during the flush (hyperdb `index.js:277`, `:665`, through hyperbee to hypercore `session-state.js:212`) then reads `this.atomized.flushing` at `:130`.
+- Any write still applying when the vault closes triggers it, on either build.
+  - 031d532 reproduced it too: 14 of 23 times when switching the moment `instance.add` starts, and 5 of 5 with the apply held mid-flush.
+  - The re-key build only makes it likely after an upgrade, because each vault re-signs its row in the background on first open.
+- In an app it cannot be caught.
+  - Hypercore's `opening.catch(safetyCatch)` re-throws a TypeError as an uncaughtException.
+  - The worklet handler (src/worklet/app.js:17-29, same in 031d532) re-throws it, and Bare aborts.
+  - Desktop only logs `[worklet exit]` (electron/main.cjs:485, :612) and does not respawn, leaving a dead vault backend until the app restarts.
+  - Mobile likely takes the whole app down (inferred, not run).
+- Fixed upstream in hypercore 11.39.6, which copies `this.atomized` into a local first. Versions 11.35.0 to 11.39.5 have the bug.
+  - With hypercore overridden to 11.39.6, the reproductions went 30 of 30 green, and the unit and network suites passed.
+  - The pinned test is expected to fail after that bump: the error stops, and its stack check names 11.35.1.
 
 ### Leaves from 031d532 devices
 
