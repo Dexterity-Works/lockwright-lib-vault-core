@@ -88,7 +88,7 @@ Test: `upgrade: switching vaults right after the upgraded vault opens throws an 
 From a separate diagnosis, run in its own worktree (not rerun here):
 - The root cause is a library race, not the re-key code.
   - Autobase 7.28.1 `_close` captures the in-flight apply at `index.js:803`, but closes the apply state at `:817` before awaiting that apply at `:825`.
-  - Releasing the atomic batches (`apply-state.js:723-724`, then `store.js:78`, `:154-158`) sets `parent.atomized = null` (hypercore `session-state.js:193`).
+  - Releasing the atomic batches (`apply-state.js:723-724`, then `store.js:154-158`, `:78`) sets `parent.atomized = null` (hypercore `session-state.js:193`).
   - A snapshot HyperDB requested during the flush (hyperdb 4.22.3 `index.js:277`, `:665`, through hyperbee to hypercore `session-state.js:212`) then reads `this.atomized.flushing` at `:130`.
 - Any write still applying when the vault closes triggers it, on either build.
   - 031d532 reproduced it too: 14 of 23 times when switching the moment `instance.add` starts, and 5 of 5 with the apply held mid-flush.
