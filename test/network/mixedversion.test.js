@@ -215,17 +215,15 @@ const countReconcile = (peer) => {
 const sha = (bytes) =>
   bytes ? crypto.createHash('sha256').update(bytes).digest('hex') : null
 
-/** Every row of the active vault's view as stored: key -> value, file hash. */
-const rawView = async (peer) => {
+/** Every row of an Autopass view as stored: key -> value, file hash. */
+const rawRows = async (instance) => {
   const rows = {}
-  for await (const row of peer.instance.base.view.find(
-    '@autopass/records',
-    {}
-  )) {
+  for await (const row of instance.base.view.find('@autopass/records', {})) {
     rows[row.key] = { value: row.value, file: sha(row.file) }
   }
   return rows
 }
+const rawView = (peer) => rawRows(peer.instance)
 
 /** Every vault row read through this peer's build, as the app reads it. */
 const readEverything = async (peer) => {
@@ -244,7 +242,7 @@ const readEverything = async (peer) => {
   return out
 }
 
-/** lib-vault's startLegacyEpoch (src/utils/startLegacyEpoch.js:17-36). */
+/** lib-vault's startLegacyEpoch (88c12b1 src/utils/startLegacyEpoch.js:17-36). */
 const startLegacyEpoch = async (peer, caller) => {
   const status = await peer.epochStatus()
   if (status.legacy !== true) return
@@ -314,10 +312,16 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
     const beforeW = { raw: await rawView(A), read: await readEverything(A) }
     const vaults = await A.appDeps.vaultsList('vault/')
     expect(vaults.map((x) => x.id).sort()).toEqual(['v', 'w'])
+    const master = await rawRows(A.appDeps.getVaultsInstance())
+    expect(Object.keys(master)).toEqual(
+      expect.arrayContaining(['masterEncryption', 'vault/v', 'vault/w'])
+    )
 
     phase(net, 'upgrade A')
     A = await net.swap('A')
     expect(A.appDeps.activeVaultEnsureEpoch).toBeDefined()
+    // The master vault, which lists the vaults, is unchanged row for row.
+    expect(await rawRows(A.appDeps.getVaultsInstance())).toEqual(master)
     expect(await A.appDeps.vaultsList('vault/')).toEqual(vaults)
     for (const [vault, before] of [
       ['w', beforeW],
@@ -442,10 +446,11 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
     await converge([A, R], 'note/r')
     expect(await A.epochStatus()).toMatchObject({ legacy: true })
 
-    // L deletes the vault locally. The released lib-vault broadcasts a
-    // leave first (deleteVaultLocal.js at 24a94fc). The harness has no
-    // lib-vault, so A runs what leaveVaultActionHandler runs when the leave
-    // reaches it (leaveVault.js:34-50): startLegacyEpoch, the sweep, then
+    // L deletes the vault locally. The lib-vault the shipped apps pin
+    // broadcasts a leave first (24a94fc src/api/deleteVaultLocal.js). The
+    // harness has no lib-vault, so A runs what leaveVaultActionHandler runs
+    // when the leave reaches it (lib-vault 88c12b1
+    // src/actions/handlers/leaveVault.js:34-50): startLegacyEpoch, the sweep, then
     // ensureEpoch({ start: true }); Peer.kick is the sweep plus that call.
     await L.closeVault()
     await startLegacyEpoch(A, 'leave-vault')
@@ -455,13 +460,95 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
       members: ['device-A'],
       uncovered: ['device-R']
     })
-    expect(after).toMatchObject({ uncovered: ['device-R'] })
+    // The handler's own ensureEpoch finds the epoch current, which it
+    // accepts (88c12b1 leaveVault.js:51), so the leave finishes instead of
+    // retrying.
+    expect(after).toMatchObject({
+      rotated: false,
+      reason: 'current',
+      uncovered: ['device-R']
+    })
 
     // R stayed, and from now on cannot read what A writes.
     await A.add('note/after', { text: 'after the leave' })
     await waitFor(() => R.raw('note/after'), { label: 'R holds note/after' })
     expect(await R.get('note/after')).toMatchObject({ $enc: 1 })
     expect(await R.get('note/1')).toEqual({ text: 'first' })
+  })
+
+  test('upgrade: a leave deferred on the released build fires once the upgraded device opens that vault', async () => {
+    net = await createNetwork({
+      peers: ['A', 'L', 'R'],
+      builds: { A: RELEASED, L: RELEASED, R: RELEASED }
+    })
+    let { A } = net.peers
+    const { L, R } = net.peers
+    await shareVault(net)
+    await A.add('note/1', { text: 'first' })
+    await converge(net.list, 'note/1')
+    const shared = { id: A.vaultId, encryptionKey: A.encryptionKey }
+    // A works in another vault, so the shared one is not active.
+    await A.createVault({ id: 'other' })
+
+    // L deletes the shared vault locally, weeks before A upgrades. Its
+    // leave waits in L's outbox until A is online (lib-vault 24a94fc
+    // src/api/broadcastAction.js:63), then lands in A's inbox in the master
+    // vault (24a94fc src/api/inbox.js:41-45). Simulated: the harness has no
+    // lib-vault, so the test writes that inbox row itself. On 031d532 the
+    // handler defers it while the vault is not active (24a94fc
+    // src/actions/handlers/leaveVault.js:16-19), and a deferred entry is
+    // skipped without counting an attempt (24a94fc src/api/inbox.js:125-127),
+    // so it stays. Read from code, not run.
+    await L.closeVault()
+    const inboxKey = `actions/inbox/${String(Date.now()).padStart(13, '0')}_l1`
+    const entry = {
+      id: 'l1',
+      receivedAt: Date.now(),
+      envelope: {
+        id: 'e1',
+        type: 'leave-vault',
+        payload: { vaultId: shared.id },
+        actor: 'device-L',
+        sentAt: new Date().toISOString()
+      }
+    }
+    await A.appDeps.vaultsAdd(inboxKey, entry)
+
+    phase(net, 'upgrade A')
+    A = await net.swap('A')
+    expect(await A.appDeps.vaultsGet(inboxKey)).toEqual(entry)
+    await waitFor(async () => (await A.epochStatus()).uncovered.length === 0, {
+      label: "A's own row binds in the other vault"
+    })
+    A.vaultId = shared.id
+    A.encryptionKey = shared.encryptionKey
+    await A.openVault()
+    // Waits for the re-signed row, past the window the kick test covers.
+    await waitFor(
+      async () =>
+        JSON.stringify((await A.epochStatus()).uncovered) ===
+        '["device-L","device-R"]',
+      { label: "A's own row binds" }
+    )
+
+    // The current handler runs the deferred leave once the vault is active
+    // (leaveVault.js:19-21 at 88c12b1) and starts an epoch even when the
+    // leaver's row is already gone (:32-34; 24a94fc returned early at :23).
+    // Simulated as in the test above.
+    await startLegacyEpoch(A, 'leave-vault')
+    expect(await A.kick('device-L')).toMatchObject({
+      rotated: false,
+      reason: 'current'
+    })
+    await A.appDeps.vaultsRemove(inboxKey)
+    expect(await A.epochStatus()).toMatchObject({
+      legacy: false,
+      members: ['device-A'],
+      uncovered: ['device-R']
+    })
+    await A.add('note/after', { text: 'after the deferred leave' })
+    await waitFor(() => R.raw('note/after'), { label: 'R holds note/after' })
+    expect(await R.get('note/after')).toMatchObject({ $enc: 1 })
   })
 
   test('mixed: one of two released devices upgrades; both keep every item and writes cross both ways', async () => {
@@ -707,7 +794,8 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
       builds: { R: RELEASED },
       onUpdate: countReconcile
     })
-    const { R, B } = net.peers
+    let { R } = net.peers
+    const { B } = net.peers
     const rErrors = watchErrors(R)
     await shareVault(net)
     trackReconciles(B)
@@ -723,8 +811,9 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
       updatedAt: 7,
       data: { title: `Note ${id}`, note: 'edited on B' }
     })
-    for (const id of ['n1', 'n2', 'n3']) await R.add(`record-v2/${id}`, old(id))
-    await waitFor(async () => (await B.get('record/n3'))?.updatedAt === 1, {
+    const ids = ['n1', 'n2', 'n3', 'n4', 'n5']
+    for (const id of ids) await R.add(`record-v2/${id}`, old(id))
+    await waitFor(async () => (await B.get('record/n5'))?.updatedAt === 1, {
       label: 'B reads the old notes'
     })
     const first = await B.ensureEpoch({ start: true })
@@ -752,8 +841,8 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
     expect(await R.get('record/n1')).toEqual(envelope)
     expect(await B.get('record/n1')).toEqual(edited('n1'))
 
-    // B saves n2 and n3 the same way, but the v1 projection reaches R more
-    // than one debounce (100 ms) after v2. R's reconcile then sees its own
+    // B saves n2 to n5 the same way, but the v1 projection reaches R more
+    // than one debounce (100 ms) after v2; the test holds B's v1 append. R's reconcile then sees its own
     // plaintext v1 (updatedAt 1) against a sealed v2, which the released
     // mergeV1IntoV2 counts as updatedAt 0. v1 wins, and R writes a mixed
     // row: B's new ciphertext with the old plaintext beside it.
@@ -790,58 +879,94 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
       return mixed
     }
 
-    phase(net, 'v1 lands late: n2')
-    const mixed2 = await lagV1('n2')
-    phase(net, 'v1 lands late: n3')
-    const mixed3 = await lagV1('n3')
-    // Neither reconcile repairs it: the mixed row's updatedAt (1) is not
-    // below the sealed v1's on R (0), nor below B's edit (7) on B, where the
-    // mixed row decrypts to B's edit.
+    const mixed = {}
+    for (const id of ['n2', 'n3', 'n4', 'n5']) {
+      phase(net, `v1 lands late: ${id}`)
+      mixed[id] = await lagV1(id)
+    }
+    // While R stays on 031d532, neither reconcile repairs it: the mixed
+    // row's updatedAt (1) is not below the sealed v1's on R (0), nor below
+    // B's edit (7) on B, where the mixed row decrypts to B's edit.
     writes = R.writes.length
     await reconciled(R)
     await reconciled(B)
     expect(R.writes.slice(writes)).toEqual([])
-    for (const [id, mixed] of [
-      ['n2', mixed2],
-      ['n3', mixed3]
-    ]) {
-      expect(await rawJson(B, `record-v2/${id}`)).toEqual(mixed)
+    for (const id of ['n2', 'n3', 'n4', 'n5']) {
+      expect(await rawJson(B, `record-v2/${id}`)).toEqual(mixed[id])
       // R reads the OLD record; B reads its edit.
-      expect(await R.get(`record/${id}`)).toEqual(mixed)
+      expect(await R.get(`record/${id}`)).toEqual(mixed[id])
       expect(await R.get(`record/${id}`)).toMatchObject(old(id))
       expect(await B.get(`record/${id}`)).toEqual(edited(id))
     }
     expect((await R.list('record/')).map((r) => r.id)).toEqual([
       undefined,
       'n2',
-      'n3'
+      'n3',
+      'n4',
+      'n5'
     ])
 
-    phase(net, 'R edits the stale records')
-    // An edit on R starts from the old content R shows. Saved as fields the
-    // app rebuilt (no envelope fields), it replaces B's edit everywhere.
-    const fromR = (id) => ({
-      ...old(id),
+    phase(net, 'R saves the stale records')
+    // The lib-vault the shipped apps pin (24a94fc) rebuilds every saved
+    // record from id, type, vaultId, data, folder, isFavorite and createdAt
+    // with a new updatedAt (src/utils/updateRecordsFactory.js:19-30), and
+    // favourites and folder moves go through the same save
+    // (src/actions/updateRecords.js:83-113). Starting from the old content
+    // R shows, an edit (n2) or a favourite (n3) replaces B's edit on both
+    // devices.
+    const rebuilt = (id, changes) => ({
+      id,
+      type: 'note',
+      folder: null,
+      isFavorite: false,
+      schema: 2,
       updatedAt: 9,
-      data: { title: `Note ${id}`, note: 'old text, edited on R' }
+      data: { title: `Note ${id}`, note: 'old text' },
+      ...changes
     })
-    await R.add('record-v2/n2', fromR('n2'))
-    // Saved as the listed record spread with new fields, it keeps B's
-    // envelope: B decrypts that and never sees R's edit, while R reads it.
-    await R.add('record-v2/n3', { ...mixed3, ...fromR('n3') })
+    const savedN2 = rebuilt('n2', {
+      data: { title: 'Note n2', note: 'old text, edited on R' }
+    })
+    const savedN3 = rebuilt('n3', { isFavorite: true })
+    await R.add('record-v2/n2', savedN2)
+    await R.add('record-v2/n3', savedN3)
+    // Not reachable from the shipped app: a save that spreads the listed
+    // record keeps B's envelope, so B decrypts that and never sees R's edit.
+    const spreadN4 = {
+      ...mixed.n4,
+      updatedAt: 9,
+      data: { title: 'Note n4', note: 'old text, edited on R' }
+    }
+    await R.add('record-v2/n4', spreadN4)
     await waitFor(
-      async () => (await rawJson(B, 'record/n3'))?.updatedAt === 9,
-      {
-        label: "B holds R's edits"
-      }
+      async () => (await rawJson(B, 'record/n4'))?.updatedAt === 9,
+      { label: "B holds R's saves" }
     )
     await reconciled(R)
     await reconciled(B)
-    expect(await B.get('record/n2')).toEqual(fromR('n2'))
-    expect(await R.get('record/n2')).toEqual(fromR('n2'))
-    expect(await B.get('record/n3')).toEqual(edited('n3'))
-    expect(await R.get('record/n3')).toMatchObject(fromR('n3'))
+    for (const peer of [R, B]) {
+      expect(await peer.get('record/n2')).toEqual(savedN2)
+      expect(await peer.get('record/n3')).toEqual(savedN3)
+    }
+    expect(await B.get('record/n4')).toEqual(edited('n4'))
+    expect(await R.get('record/n4')).toEqual(spreadN4)
     expect(rErrors).toEqual([])
+
+    phase(net, 'R upgrades')
+    // On the re-key build R decrypts the mixed row once it joins the
+    // epoch: n5, which R never saved, reads as B's edit there.
+    R = await net.swap('R')
+    await waitFor(
+      async () => {
+        const s = await R.epochStatus()
+        return s.canRead && s.members.includes('device-R')
+      },
+      { label: 'R joins the epoch' }
+    )
+    expect(await R.get('record/n5')).toEqual(edited('n5'))
+    expect(await R.get('record/n4')).toEqual(edited('n4'))
+    expect(await R.get('record/n2')).toEqual(savedN2)
+    expect(await R.get('record/n1')).toEqual(edited('n1'))
   })
 
   test('mixed: a client that saves record/ first races the other build for the v2 twin', async () => {
@@ -1028,6 +1153,7 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
     })
     await A.add('record/s1/file/g1', { name: 'g1.bin' }, sealedFile, 'g1.bin')
     await A.add('note/s', { text: 'sealed note' })
+    const sealedState = await readEverything(A)
 
     phase(net, 'roll A back')
     A = await net.swap('A', RELEASED)
@@ -1096,6 +1222,24 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
       'r2',
       's1'
     ])
+    // Every row reads as before the rollback, except what the rollback
+    // wrote: note/rb, and r1's two rows.
+    const changed = [
+      'note/rb',
+      'record/r1',
+      'record-v2/r1',
+      'list record/',
+      'list note/'
+    ]
+    const omit = (rows) =>
+      Object.fromEntries(
+        Object.entries(rows).filter(([key]) => !changed.includes(key))
+      )
+    const rolledForward = await readEverything(A)
+    expect(omit(rolledForward)).toEqual(omit(sealedState))
+    expect(Object.keys(rolledForward).sort()).toEqual(
+      [...Object.keys(sealedState), 'note/rb'].sort()
+    )
   })
 
   test('revoke: kicking a device on the released build needs no rotation and leaves it read-only', async () => {
