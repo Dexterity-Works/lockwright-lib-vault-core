@@ -32,7 +32,38 @@ const fullName = (test) => {
   return names.join(' ')
 }
 
+// Collects the uncaught exceptions and unhandled rejections of the real
+// process instead of letting jest fail whichever test is running when they
+// land, so a test can assert the error a known bug throws. The test's own
+// `process` is a copy; jest's handlers sit on this one.
+const captureUncaught = () => {
+  const events = ['uncaughtException', 'unhandledRejection']
+  const saved = Object.fromEntries(
+    events.map((event) => [event, process.listeners(event)])
+  )
+  const errors = []
+  const collect = (error) => errors.push(error)
+  for (const event of events) {
+    process.removeAllListeners(event)
+    process.on(event, collect)
+  }
+  return {
+    errors,
+    restore: () => {
+      for (const event of events) {
+        process.removeListener(event, collect)
+        for (const listener of saved[event]) process.on(event, listener)
+      }
+    }
+  }
+}
+
 class NetworkEnvironment extends TestEnvironment {
+  constructor(config, context) {
+    super(config, context)
+    this.global.__lockwrightCaptureUncaught = captureUncaught
+  }
+
   async handleTestEvent(event) {
     switch (event.name) {
       case 'test_start':

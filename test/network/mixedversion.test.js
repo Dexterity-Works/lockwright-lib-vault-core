@@ -254,6 +254,9 @@ const startLegacyEpoch = async (peer, caller) => {
   )
 }
 
+/** See test/network/jest.environment.cjs. */
+const captureUncaught = () => globalThis.__lockwrightCaptureUncaught()
+
 /** The raw row under `key` on `peer`, parsed, or null. */
 const rawJson = async (peer, key) => {
   const raw = await peer.raw(key)
@@ -549,6 +552,97 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
     await A.add('note/after', { text: 'after the deferred leave' })
     await waitFor(() => R.raw('note/after'), { label: 'R holds note/after' })
     expect(await R.get('note/after')).toMatchObject({ $enc: 1 })
+  })
+
+  test('upgrade: switching vaults right after the upgraded vault opens throws an uncaught TypeError (bug)', async () => {
+    // The bug, pinned. Once src is fixed this test fails: then expect
+    // `caught.errors` to be empty instead. The errors are collected off the
+    // real process (jest.environment.cjs) and the network is torn down
+    // inside the capture, so none lands in a later test.
+    // Cause (reproduced): the open-time re-sign's instance.add on the first
+    // vault starts (epochStore.js:882, not awaited); closeActiveVaultInstance
+    // then closes that vault (appDeps.js:257-259). Autopass _close ->
+    // Autobase _close -> ApplyState._free -> ViewCore.release ->
+    // Hypercore.close -> SessionState.close/unref sets parent.atomized to
+    // null while the apply's atomic batch is still flushing, and a snapshot
+    // session in _updateSnapshotStorage reads this.atomized.flushing after
+    // its await (hypercore 11.35.1 lib/session-state.js:130). The re-sign's
+    // error is caught (epochStore.js:708-714), so that row stays unsigned.
+    // 031d532 writes nothing on open; the upgrade creates the window.
+    // The test holds w's re-sign add until the switch starts, so the add is
+    // in flight when w closes. Whether the close lands inside the apply's
+    // flush still depends on timing: alone this test hit it 8 of 8 times,
+    // inside the full file it missed about 1 run in 3. So it tries up to
+    // five times and expects the error at least once.
+    const attempt = async (round) => {
+      let resign = null
+      let armed = false
+      net = await createNetwork({
+        peers: ['A', 'R'],
+        builds: { A: RELEASED, R: RELEASED },
+        name: `flush${round}`,
+        onCreate: (label, instance, peer) => {
+          if (!armed || label !== 'autopass' || !peer.started) return
+          armed = false
+          const add = instance.add.bind(instance)
+          let open
+          let reach
+          const gate = new Promise((resolve) => (open = resolve))
+          const reached = new Promise((resolve) => (reach = resolve))
+          instance.add = async (key, ...rest) => {
+            if (key === 'device/device-A') {
+              reach()
+              await gate
+            }
+            return add(key, ...rest)
+          }
+          resign = { reached, release: open }
+        }
+      })
+      let { A } = net.peers
+      await shareVault(net)
+      await A.add('note/1', { text: 'in v' })
+      await converge(net.list, 'note/1')
+      const v = { id: A.vaultId, encryptionKey: A.encryptionKey }
+      await A.createVault({ id: 'w' })
+      armed = true
+      A = await net.swap('A')
+      await resign.reached
+
+      const caught = captureUncaught()
+      try {
+        // The swap opened w and its re-sign is under way; the user switches
+        // to v at once.
+        resign.release()
+        A.vaultId = v.id
+        A.encryptionKey = v.encryptionKey
+        await A.openVault()
+        expect(await A.get('note/1')).toEqual({ text: 'in v' })
+        // Everything closes inside the capture, so nothing lands later.
+        await net.destroy()
+        net = null
+      } finally {
+        caught.restore()
+      }
+      return caught
+    }
+    let caught
+    for (let round = 1; round <= 5; round++) {
+      caught = await attempt(round)
+      if (caught.errors.length) break
+    }
+    // Each closing session throws once; how many varies with the run.
+    expect(caught.errors.length).toBeGreaterThan(0)
+    for (const error of caught.errors) {
+      expect(error).toBeInstanceOf(TypeError)
+      expect(error.message).toBe(
+        "Cannot read properties of null (reading 'flushing')"
+      )
+      expect(error.stack).toContain('_updateSnapshotStorage')
+      expect(error.stack).toMatch(
+        /hypercore@11\.35\.1.*lib\/session-state\.js:130/
+      )
+    }
   })
 
   test('mixed: one of two released devices upgrades; both keep every item and writes cross both ways', async () => {
