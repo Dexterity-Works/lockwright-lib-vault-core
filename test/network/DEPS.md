@@ -117,7 +117,7 @@ Resolution chain: hyperswarm 4.17.0 -> hyperdht 6.33.0 -> dht-rpc 6.27.0 -> udx-
 
 ## Mixed-version peers
 
-`mixedversion.test.js` runs the released vault-core (031d532, the build the shipped apps run per the superproject's master `packages.lock`) beside the epoch re-key build in one jest process. Loader: `test/network/release.cjs`; driver: `ReleasePeer` in `peer.js`; `createNetwork({ builds: { R: RELEASED } })` and `net.swap(id, build)` in `harness.js`.
+`mixedversion.test.js` runs the released vault-core (031d532, the build the shipped apps run) beside the epoch re-key build in one jest process. Loader: `test/network/release.cjs`; driver: `ReleasePeer` in `peer.js`; `createNetwork({ builds: { R: RELEASED } })` and `net.swap(id, build)` in `harness.js`.
 
 - Release tree: a detached worktree at 031d532 with its own `node_modules`, at `../release-031d532` beside this checkout or at `LOCKWRIGHT_RELEASE_DIR`. Make one with `git worktree add --detach ../release-031d532 031d532` and `pnpm install --no-frozen-lockfile` inside it. Without a tree the file skips; a tree at another commit, or without `node_modules`, fails the run.
 - Each side resolves its own dependencies. The released appDeps is required from the release tree, so Node resolution starting at `release-031d532/src/worklet` picks the release tree's `node_modules`; the current build picks this checkout's. That is what a mixed deployment runs: each app ships the copies its own lockfile pins.
