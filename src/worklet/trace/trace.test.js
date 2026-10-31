@@ -3,8 +3,11 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 
+import bareFs from 'bare-fs'
+
 import { openTraceFile } from './file.js'
 import { configureTrace, getTracer, trace } from './index.js'
+import { Tracer } from './tracer.js'
 import { networkCreated, networkOptions } from '../utils/swarm'
 
 jest.mock('bare-fs', () => jest.requireActual('fs'))
@@ -16,6 +19,8 @@ const fakeSwarm = () => {
     bootstrapNodes: [],
     stats: { punches: {}, relaying: {} },
     destroyed: false,
+    io: { serverSocket: { name: 'server' }, clientSocket: { name: 'client' } },
+    _socketPool: { lookup: () => false },
     connect: () => new EventEmitter(),
     fullyBootstrapped: () => new Promise(() => {}),
     address: () => null
@@ -143,5 +148,141 @@ describe('worklet trace switch', () => {
       inviteCode: '[REDACTED]',
       nested: { b64: '[REDACTED]' }
     })
+  })
+
+  test('a failed rotation stops the trace and never closes a reused fd', () => {
+    const file = path.join(dir, 'trace.jsonl')
+    fs.mkdirSync(`${file}.1`)
+    const closeSync = jest.spyOn(bareFs, 'closeSync')
+    try {
+      const sink = openTraceFile(file, { maxSize: 10 })
+      expect(() => {
+        sink.write('0123456789\n')
+        sink.write('rotates, fails\n')
+        sink.write('dropped\n')
+        sink.close()
+      }).not.toThrow()
+      expect(closeSync).toHaveBeenCalledTimes(1)
+      expect(fs.readFileSync(file, 'utf8')).toBe('0123456789\n')
+    } finally {
+      closeSync.mockRestore()
+    }
+  })
+})
+
+describe('worklet tracer', () => {
+  const memoryTracer = () =>
+    new Tracer({ sink: { write: () => {} }, keepEvents: true })
+
+  test('adds no error listener to an autobase or a connection', () => {
+    const tracer = memoryTracer()
+    const base = Object.assign(new EventEmitter(), {
+      getLastError: () => null
+    })
+    tracer.attachBase('vault', base)
+    expect(base.listenerCount('error')).toBe(0)
+
+    const swarm = fakeSwarm()
+    tracer.attachSwarm('vault', swarm)
+    const conn = Object.assign(new EventEmitter(), {
+      remotePublicKey: Buffer.alloc(32, 3)
+    })
+    swarm.emit('connection', conn)
+    expect(conn.listenerCount('error')).toBe(0)
+    expect(swarm.listenerCount('error')).toBe(0)
+
+    // A fatal error is read when the base closes.
+    const fatal = Object.assign(new Error('boom'), { code: 'FATAL' })
+    base.getLastError = () => fatal
+    base.emit('close')
+    expect(tracer.events.at(-1)).toMatchObject({
+      event: 'error',
+      where: 'autobase.close',
+      code: 'FATAL'
+    })
+    tracer.close()
+  })
+
+  test('learns relay addresses at runtime and never calls a ridden stream direct', () => {
+    const relayKey = Buffer.alloc(32, 9)
+    const peerKey = Buffer.alloc(32, 4)
+    const otherKey = Buffer.alloc(32, 5)
+    const stream = (key, host, port, socket) =>
+      Object.assign(new EventEmitter(), {
+        remotePublicKey: key,
+        rawStream: Object.assign(new EventEmitter(), {
+          connected: true,
+          remoteHost: host,
+          remotePort: port,
+          socket
+        })
+      })
+    const run = (relayThrough) => {
+      const tracer = memoryTracer()
+      const swarm = fakeSwarm()
+      swarm.relayThrough = relayThrough
+      const dials = []
+      swarm.dht.connect = (key) => {
+        const conn = stream(key, '10.0.0.9', 4000, swarm.dht.io.clientSocket)
+        dials.push(conn)
+        return conn
+      }
+      tracer.attachSwarm('vault', swarm)
+      // hyperdht dials the relay itself, then the app stream rides it.
+      swarm.dht.connect(relayKey)
+      dials[0].emit('open')
+      swarm.emit(
+        'connection',
+        stream(peerKey, '10.0.0.9', 4000, swarm.dht.io.clientSocket)
+      )
+      swarm.emit(
+        'connection',
+        stream(otherKey, '10.0.0.7', 5000, swarm.dht.io.serverSocket)
+      )
+      tracer.close()
+      return tracer.events.filter((e) => e.event === 'conn.open')
+    }
+
+    const known = run(() => [relayKey])
+    expect(known.map((e) => e.path)).toEqual(['relayed', 'direct'])
+    // A relay the tracer cannot name: unknown, not direct.
+    const unnamed = run(null)
+    expect(unnamed.map((e) => e.path)).toEqual(['unknown', 'direct'])
+  })
+
+  test('cuts UUIDs and absolute paths in any string', () => {
+    const tracer = memoryTracer()
+    const uuid = '3f2c9a71-5b6e-4d2a-9c1f-7e8d6b5a4c3b'
+    const line = tracer.error(
+      'open',
+      new Error(
+        `ENOENT: no such file, open '/home/someone/Lockwright/vault/${uuid}/db' and C:\\Users\\someone\\trace.jsonl`
+      )
+    )
+    expect(line.message).toBe("ENOENT: no such file, open 'db' and trace.jsonl")
+    expect(tracer.record('probe', { id: uuid }).id).toBe('3f2c9a71')
+    tracer.close()
+  })
+
+  test('the sample timer stops with its last sampler and starts again', () => {
+    jest.useFakeTimers()
+    try {
+      const tracer = memoryTracer()
+      const first = fakeSwarm()
+      tracer.attachSwarm('vault', first)
+      expect(tracer.timer).not.toBeNull()
+      first.destroyed = true
+      first.dht.destroyed = true
+      jest.advanceTimersByTime(500)
+      expect(tracer.samplers.size).toBe(0)
+      expect(tracer.timer).toBeNull()
+      expect(jest.getTimerCount()).toBe(0)
+      tracer.attachSwarm('personalSwarm', fakeSwarm())
+      expect(tracer.timer).not.toBeNull()
+      tracer.close()
+      expect(jest.getTimerCount()).toBe(0)
+    } finally {
+      jest.useRealTimers()
+    }
   })
 })

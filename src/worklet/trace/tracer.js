@@ -7,8 +7,14 @@ import { redact } from '../utils/redact.js'
 // autobase lengths, error codes and timings. It never records secrets,
 // record contents, vault or item names, passwords, invite codes or full
 // keys: fields go through the worklet's redact(), keys only ever appear as
-// short() prefixes, and scrub() replaces any long hex, base64 or z32 run
-// that reaches a string field anyway.
+// short() prefixes, and scrub() cuts what reaches a string field anyway:
+// an absolute path to its last component, a UUID to its first 8 chars, and
+// any long hex, base64 or z32 run to [REDACTED].
+//
+// The tracer only listens. It adds no 'error' listener to anything it
+// watches: autobase and streams treat a missing listener as "crash", and a
+// listener would turn that into a silently closed vault. Errors are read on
+// close instead.
 
 /** The first 8 chars of a key or id: enough to tell peers apart, never the key. */
 export const short = (value) => {
@@ -23,10 +29,19 @@ const LONG_RUNS = [
   /[ybndrfg8ejkmcpqxot1uwisza345h769]{40,}/g
 ]
 
-/** A string with every key-length run replaced. */
+// Absolute only: at the start, or after a space, quote, bracket, = or :.
+const POSIX_PATH = /(?<=^|[\s'"`(=:,])(?:\/+[^\s/'"`]+)+\/([^\s/'"`]+)/g
+const WINDOWS_PATH = /\b[A-Za-z]:\\(?:[^\s\\'"`]+\\)*([^\s\\'"`]+)/g
+const UUID =
+  /\b([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi
+
+/** A string with paths, UUIDs and key-length runs cut down. */
 export const scrub = (value) => {
   if (typeof value === 'string') {
     let out = value
+      .replace(POSIX_PATH, '$1')
+      .replace(WINDOWS_PATH, '$1')
+      .replace(UUID, '$1')
     for (const run of LONG_RUNS) out = out.replace(run, '[REDACTED]')
     return out
   }
@@ -49,15 +64,27 @@ const socketName = (socket, dht) => {
   return 'other'
 }
 
+const hex = (key) => {
+  if (!key) return null
+  return typeof key === 'string' ? key.toLowerCase() : b4a.toString(key, 'hex')
+}
+
 /**
  * direct / holepunched / relayed, from where the raw stream's packets go.
  * Nothing on the connection names the path (test/network/DEPS.md Recipes c).
+ * A relayed stream rides the relay connection's socket and address, so
+ * `relayAddresses` is where the known relays answered. `ridden(address)` is
+ * the key of another stream dialed to that address, if any: a stream on
+ * someone else's address that is not a known relay is `unknown`, never
+ * `direct`.
  */
-export const classify = (conn, dht, relayAddresses) => {
+export const classify = (conn, dht, relayAddresses, ridden = () => null) => {
   const rs = conn.rawStream
   if (!rs || !rs.connected) return 'pending'
   const remote = `${rs.remoteHost}:${rs.remotePort}`
   if (relayAddresses.has(remote)) return 'relayed'
+  const owner = ridden(remote)
+  if (owner && owner !== hex(conn.remotePublicKey)) return 'unknown'
   if (dht._socketPool?.lookup(rs.socket)) return 'holepunched'
   if (rs.socket === dht.io.serverSocket || rs.socket === dht.io.clientSocket) {
     return 'direct'
@@ -99,6 +126,11 @@ export class Tracer {
     this.peer = peer
     this.sink = sink
     this.relayAddresses = relayAddresses
+    // Relay keys from the swarms' relayThrough and the dials' options; the
+    // address a dial to one of them opens on is a relay address.
+    this.relayKeys = new Set()
+    // Per DHT: remote address -> key of the dialed stream open on it.
+    this.dialed = new WeakMap()
     this.onEvent = onEvent
     this.events = keepEvents ? [] : null
     this.sampleInterval = sampleInterval
@@ -199,12 +231,19 @@ export class Tracer {
 
     // Every outgoing connect, the swarm's and a relay dial's alike. One
     // that closes without opening is a conn.fail with the stream's error.
+    const dialed = new Map()
+    this.dialed.set(dht, dialed)
     const connect = dht.connect.bind(dht)
     dht.connect = (remotePublicKey, opts) => {
+      if (typeof opts?.relayThrough !== 'function') {
+        this.learnRelays(opts?.relayThrough)
+      }
       const conn = connect(remotePublicKey, opts)
       const remote = short(remotePublicKey)
+      const key = hex(remotePublicKey)
       const started = now()
       let opened = false
+      let address = null
       this.record('conn.attempt', {
         label,
         remote,
@@ -212,8 +251,17 @@ export class Tracer {
       })
       conn.once('open', () => {
         opened = true
+        const rs = conn.rawStream
+        if (!rs?.connected) return
+        address = `${rs.remoteHost}:${rs.remotePort}`
+        dialed.set(address, key)
+        if (this.relayKeys.has(key)) {
+          this.relayAddresses.add(address)
+          this.record('relay.open', { label, remote, address })
+        }
       })
       conn.once('close', () => {
+        if (address && dialed.get(address) === key) dialed.delete(address)
         if (opened) return
         const error = streamError(conn)
         this.record('conn.fail', {
@@ -242,6 +290,12 @@ export class Tracer {
     if (this.swarms.has(swarm)) return
     this.swarms.add(swarm)
     const dht = swarm.dht
+    try {
+      // hyperswarm's relayThrough(force, swarm) only returns its option.
+      this.learnRelays(swarm.relayThrough?.(true, swarm))
+    } catch {
+      // a relay we cannot name is classified `unknown`, not `direct`
+    }
     this.record('swarm.create', {
       label,
       key: short(swarm.keyPair.publicKey),
@@ -334,6 +388,15 @@ export class Tracer {
     )
   }
 
+  /** @param {Buffer | string | Array<Buffer | string> | null | undefined} keys */
+  learnRelays(keys) {
+    for (const key of Array.isArray(keys) ? keys : [keys]) {
+      if (key && (typeof key === 'string' || b4a.isBuffer(key))) {
+        this.relayKeys.add(hex(key))
+      }
+    }
+  }
+
   /**
    * Records `take()` now and again every sampleInterval ms, but only when
    * it changed, so idle periods stay quiet. Stops once `done()` is true.
@@ -361,6 +424,11 @@ export class Tracer {
           this.samplers.delete(sampler)
         }
       }
+      // Nothing left to watch; the next sample() starts it again.
+      if (this.samplers.size === 0) {
+        clearInterval(this.timer)
+        this.timer = null
+      }
     }, this.sampleInterval)
     this.timer.unref?.()
   }
@@ -377,7 +445,12 @@ export class Tracer {
         label,
         remote,
         initiator: conn.isInitiator,
-        path: classify(conn, dht, this.relayAddresses),
+        path: classify(
+          conn,
+          dht,
+          this.relayAddresses,
+          (address) => this.dialed.get(dht)?.get(address) ?? null
+        ),
         socket: socketName(rs?.socket, dht),
         remoteAddress: rs?.connected
           ? `${rs.remoteHost}:${rs.remotePort}`
@@ -389,11 +462,11 @@ export class Tracer {
     conn.rawStream?.on('remote-changed', () =>
       this.record('conn.upgrade', describe())
     )
-    conn.on('error', (error) => this.error('conn', error, { label, remote }))
     conn.on('close', () =>
       this.record('conn.close', {
         label,
         remote,
+        code: errorCode(streamError(conn)),
         bytesRead: conn.rawBytesRead,
         bytesWritten: conn.rawBytesWritten
       })
@@ -434,7 +507,12 @@ export class Tracer {
     base.on('warning', (error) =>
       this.error('autobase.warning', error, { label })
     )
-    base.on('error', (error) => this.error('autobase', error, { label }))
+    // Not base.on('error'): see the note at the top of this file.
+    base.on('close', () => {
+      const error = base.getLastError?.() ?? null
+      if (error) this.error('autobase.close', error, { label })
+      else this.record('autobase.close', { label })
+    })
   }
 
   /** Recorded when it differs from the last status this tracer saw. */

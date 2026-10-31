@@ -1,3 +1,4 @@
+import crypto from 'crypto'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
@@ -131,8 +132,16 @@ describe('per-peer tracer', () => {
     await A.goOnline()
     await A.kick('device-C')
     await converge([A, B], 'note/1')
+    // An error whose message names a vault folder under the home directory.
+    const uuid = crypto.randomUUID()
+    net.tracers.A.error(
+      'probe',
+      new Error(
+        `ENOENT: open '${path.join(os.homedir(), 'Lockwright', 'vault', uuid)}/db'`
+      )
+    )
 
-    const secrets = [vaultName, ...Object.values(item)]
+    const secrets = [vaultName, ...Object.values(item), uuid, os.homedir()]
     for (const peer of net.list) {
       secrets.push(
         peer.encryptionKey,
@@ -146,12 +155,15 @@ describe('per-peer tracer', () => {
       )
     }
     for (const code of codes) secrets.push(code.split('/')[1])
-    expect(secrets.every((s) => typeof s === 'string' && s.length >= 15)).toBe(
+    expect(secrets.every((s) => typeof s === 'string' && s.length >= 12)).toBe(
       true
     )
 
     const events = net.list.flatMap((peer) => net.tracers[peer.id].events)
     const names = new Set(events.map((e) => e.event))
+    expect(
+      events.find((e) => e.event === 'error' && e.where === 'probe').message
+    ).toBe(`ENOENT: open 'db'`)
     for (const name of [
       'conn.attempt',
       'conn.fail',

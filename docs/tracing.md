@@ -25,7 +25,11 @@ Turn the trace on before unlocking, so it sees the master vault, the active vaul
 
 One JSON object per line: `t` (ms since the trace started, monotonic), `wall` (the device's clock), `event`, `label` (`master`, `vault`, `pairer`, `personalSwarm`, `personalSend`, `sharedDHT`) and the event's fields.
 
-It holds key prefixes (8 characters), peer IP:port, topic and autobase lengths, error codes and timings. It never holds secrets, record contents, vault or item names, passwords, invite codes or full keys. Fields go through the logger's `redact()`, and any string with a key-length hex, base64 or z32 run has it replaced. The network tests sweep the trace and its report for all of these.
+It holds key prefixes (8 characters), peer IP:port, topic and autobase lengths, error codes and timings. It never holds secrets, record contents, vault or item names, passwords, invite codes or full keys. Fields go through the logger's `redact()`. In any string, an absolute path is cut to its last component, a UUID to its first 8 characters, and a key-length hex, base64 or z32 run is replaced. The network tests sweep the trace and its report for all of these.
+
+The tracer only listens: it adds no `error` listener to a vault or a connection, so an error that would stop the app still does. A trace file that cannot rotate stops writing.
+
+`relayed` needs the relay's address. The tracer learns it at runtime: the swarm's relay keys come from its `relayThrough` (the app's blind relays), and the address a dial to one of those keys opens on is a relay address. A connection that rides another stream's address when that stream is not a known relay is `unknown`, never `direct`.
 
 The main events:
 
@@ -33,7 +37,8 @@ The main events:
 |---|---|
 | `conn.attempt` | an outgoing connect: `remote`, `relayed` |
 | `conn.fail` | an attempt that closed without opening: `code` (`PEER_NOT_FOUND`, `HOLEPUNCH_ABORTED`, ...), `ms` |
-| `conn.open`, `conn.upgrade`, `conn.close` | `path` is `direct`, `holepunched` or `relayed`; `remoteAddress` |
+| `conn.open`, `conn.upgrade`, `conn.close` | `path` is `direct`, `holepunched`, `relayed` or `unknown`; `remoteAddress`; `conn.close` has the error `code` |
+| `relay.open` | a connection to a blind relay opened; connections on its `address` are `relayed` |
 | `swarm.stats`, `dht.stats`, `swarm.peers` | counters, sampled every 500 ms and written only when they change |
 | `epoch.status` | the active vault's epoch status, when it changes |
 | `migration.start`, `.skipped`, `.deferred`, `.resume`, `.finish`, `.error` | the record migration; `skippedAtEpoch` is an epoch prefix |
