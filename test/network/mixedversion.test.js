@@ -39,13 +39,6 @@ const sealedLogin = {
   }
 }
 
-const noteEdit = {
-  id: 'r2',
-  type: 'note',
-  updatedAt: 6,
-  data: { title: 'Secure note', note: 'n2 edited on B' }
-}
-
 /** What a device holds before anyone starts an epoch: a v1 login with a file, a v2 note, a plain note. */
 const fill = async (peer, file) => {
   await peer.add('record/r1', login(1))
@@ -58,6 +51,72 @@ const fill = async (peer, file) => {
   })
   await peer.add('record/r1/file/f1', { name: 'f1.bin' }, file, 'f1.bin')
   await peer.add('note/1', { text: 'first' })
+}
+
+/**
+ * A wider vault for the upgrade: folders, a favourite, two files under both
+ * file keys, an HOTP item (its code does not move with the clock), a
+ * deleted record and a note. Records are saved through their v2 key, the
+ * way lib-vault saves them, except r1, which an older app wrote as v1.
+ */
+const fillWide = async (peer, files) => {
+  await peer.add('record/r1', {
+    ...login(1),
+    folder: 'Work',
+    isFavorite: true,
+    createdAt: 1
+  })
+  await peer.add('record/r1/file/f1', { name: 'f1.bin' }, files[0], 'f1.bin')
+  await peer.add('record-v2/r1/file/f2', { name: 'f2.bin' }, files[1], 'f2.bin')
+  await peer.add('record-v2/r2', {
+    id: 'r2',
+    type: 'note',
+    schema: 2,
+    updatedAt: 1,
+    folder: 'Personal',
+    data: { title: 'Secure note', note: 'n2' }
+  })
+  await peer.add('record-v2/o1', {
+    id: 'o1',
+    type: 'login',
+    schema: 2,
+    updatedAt: 1,
+    data: {
+      title: 'With OTP',
+      username: 'o',
+      websites: ['https://o.test'],
+      uris: [{ uri: 'https://o.test', match: 'exact' }],
+      otp: {
+        type: 'HOTP',
+        secret: 'JBSWY3DPEHPK3PXP',
+        digits: 6,
+        counter: 3,
+        algorithm: 'SHA1',
+        issuer: 'Test',
+        label: 'o'
+      }
+    }
+  })
+  await peer.add('record-v2/d1', {
+    id: 'd1',
+    type: 'note',
+    schema: 2,
+    updatedAt: 1,
+    data: { title: 'Deleted', note: 'gone' }
+  })
+  await peer.remove('record-v2/d1')
+  await peer.add('note/1', { text: 'first' })
+}
+
+/** `after` equals `before` except `key`, which only gained a signature. */
+const expectSameRowsBut = (after, before, key) => {
+  const { [key]: rowAfter, ...restAfter } = after
+  const { [key]: rowBefore, ...restBefore } = before
+  expect(restAfter).toEqual(restBefore)
+  const { sig, writerPublicKey, ...unsigned } = JSON.parse(rowAfter.value)
+  expect(unsigned).toEqual(JSON.parse(rowBefore.value))
+  expect(sig).toEqual(expect.any(String))
+  expect(writerPublicKey).toEqual(expect.any(String))
 }
 
 /** The items `fill` wrote, read the way this peer's build reads them. */
@@ -116,6 +175,87 @@ const holdAdds = (peer, key) => {
   }
 }
 
+/** Hold every `get` of `key` on `peer` until release(), like holdAdds. */
+const holdGets = (peer, key) => {
+  const instance = peer.instance
+  const get = instance.get.bind(instance)
+  let open
+  const gate = new Promise((resolve) => (open = resolve))
+  instance.get = async (k, ...rest) => {
+    if (k === key) await gate
+    return get(k, ...rest)
+  }
+  return {
+    release: () => {
+      peer.trace('test.release', { key })
+      open()
+    }
+  }
+}
+
+/**
+ * Count a current-build peer's reconciles the way ReleasePeer counts the
+ * released build's, so harness reconciled() works on it. The current
+ * runIncrementalReconcile also starts by reading `vault-ext` and calls
+ * onUpdate when done; createNetwork's onUpdate below counts the end.
+ */
+const trackReconciles = (peer) => {
+  peer.reconcile = { started: 0, done: 0, tracked: true }
+  const instance = peer.instance
+  const get = instance.get.bind(instance)
+  instance.get = (key, ...rest) => {
+    if (key === 'vault-ext') peer.reconcile.started++
+    return get(key, ...rest)
+  }
+}
+const countReconcile = (peer) => {
+  if (peer.reconcile?.tracked) peer.reconcile.done++
+}
+
+const sha = (bytes) =>
+  bytes ? crypto.createHash('sha256').update(bytes).digest('hex') : null
+
+/** Every row of the active vault's view as stored: key -> value, file hash. */
+const rawView = async (peer) => {
+  const rows = {}
+  for await (const row of peer.instance.base.view.find(
+    '@autopass/records',
+    {}
+  )) {
+    rows[row.key] = { value: row.value, file: sha(row.file) }
+  }
+  return rows
+}
+
+/** Every vault row read through this peer's build, as the app reads it. */
+const readEverything = async (peer) => {
+  const out = {}
+  for (const key of Object.keys(await rawView(peer))) {
+    if (key.startsWith('device/') || key.startsWith('epoch/')) continue
+    out[key] = {
+      value: await peer.get(key),
+      file: sha(await peer.getFile(key))
+    }
+  }
+  out['list record/'] = (await peer.list('record/')).sort((a, b) =>
+    String(a.id).localeCompare(String(b.id))
+  )
+  out['list note/'] = await peer.list('note/')
+  return out
+}
+
+/** lib-vault's startLegacyEpoch (src/utils/startLegacyEpoch.js:17-36). */
+const startLegacyEpoch = async (peer, caller) => {
+  const status = await peer.epochStatus()
+  if (status.legacy !== true) return
+  const started = await peer.ensureEpoch({ start: true })
+  if (started?.rotated === true) return
+  if ((await peer.epochStatus()).legacy === false) return
+  throw new Error(
+    `${caller}: cannot start the vault key: ${started?.reason ?? 'no result'}`
+  )
+}
+
 /** The raw row under `key` on `peer`, parsed, or null. */
 const rawJson = async (peer, key) => {
   const raw = await peer.raw(key)
@@ -139,79 +279,127 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
     reset()
   })
 
-  test('upgrade: a vault the released build filled opens intact on the re-key build', async () => {
+  test('upgrade: two vaults the released build filled open intact on the re-key build', async () => {
     net = await createNetwork({ peers: ['A'], builds: { A: RELEASED } })
     let { A } = net.peers
     expect(A.appDeps.activeVaultEnsureEpoch).toBeUndefined()
     await A.createVault({ id: 'v' })
-    const file = crypto.randomBytes(4096)
-    await fill(A, file)
-    const before = await readFilled(A)
-    expect(before.r1).toMatchObject({ data: { password: 'p1' }, schema: 2 })
-    expect(before.file.equals(file)).toBe(true)
-    expect(before.ids).toEqual(['r1', 'r2'])
+    const files = [crypto.randomBytes(4096), crypto.randomBytes(1024)]
+    await fillWide(A, files)
+    const v = { id: A.vaultId, encryptionKey: A.encryptionKey }
+    const beforeV = { raw: await rawView(A), read: await readEverything(A) }
+    expect(beforeV.raw['record-v2/d1']).toBeUndefined()
+    expect(beforeV.raw['record/d1']).toBeUndefined()
+    expect(beforeV.read['record/r1'].value).toMatchObject({
+      folder: 'Work',
+      isFavorite: true,
+      schema: 2
+    })
+    expect(beforeV.read['record/r1/file/f1'].file).toBe(sha(files[0]))
+    expect(beforeV.read['record-v2/r1/file/f2'].file).toBe(sha(files[1]))
+    expect(beforeV.read['record-v2/o1'].value.otpPublic).toMatchObject({
+      type: 'HOTP',
+      currentCode: expect.any(String)
+    })
+    // A second vault, left active, as the app leaves whichever was last.
+    await A.createVault({ id: 'w' })
+    await A.add('record-v2/w1', {
+      id: 'w1',
+      type: 'login',
+      schema: 2,
+      updatedAt: 1,
+      data: { title: 'Other vault', password: 'pw', websites: [], uris: [] }
+    })
+    await A.add('note/w', { text: 'second vault' })
+    const beforeW = { raw: await rawView(A), read: await readEverything(A) }
+    const vaults = await A.appDeps.vaultsList('vault/')
+    expect(vaults.map((x) => x.id).sort()).toEqual(['v', 'w'])
 
     phase(net, 'upgrade A')
     A = await net.swap('A')
     expect(A.appDeps.activeVaultEnsureEpoch).toBeDefined()
-    expect(await readFilled(A)).toEqual(before)
-    // The released build had already moved the vault to schema 2, so the
-    // re-key build's migration has nothing to do and finishes at once.
-    expect(A.appDeps.getVaultMigrationStatus()).toMatchObject({
-      ready: true,
-      inProgress: false,
-      deferred: false,
-      migratedToSchema: 2,
-      error: null,
-      lastResult: { alreadyMigrated: true, complete: true }
-    })
-    expect(await A.epochStatus()).toMatchObject({ legacy: true, canRead: true })
-
-    // The released build wrote A's device row unsigned. On open the re-key
-    // build signs it again, after which the row binds.
-    const bound = await waitFor(
-      async () => {
-        const status = await A.epochStatus()
-        return status.uncovered.length === 0 ? status : false
-      },
-      { label: "A's own row binds" }
-    )
-    expect(bound).toMatchObject({ legacy: true, uncovered: [] })
-    expect(JSON.parse((await A.raw('device/device-A')).value)).toMatchObject({
-      id: 'device-A',
-      sig: expect.any(String)
-    })
+    expect(await A.appDeps.vaultsList('vault/')).toEqual(vaults)
+    for (const [vault, before] of [
+      ['w', beforeW],
+      ['v', beforeV]
+    ]) {
+      if (A.vaultId !== vault) {
+        A.vaultId = v.id
+        A.encryptionKey = v.encryptionKey
+        await A.openVault()
+      }
+      expect(await readEverything(A)).toEqual(before.read)
+      // The released build had already moved the vault to schema 2, so the
+      // re-key build's migration has nothing to do and finishes at once.
+      expect(A.appDeps.getVaultMigrationStatus()).toMatchObject({
+        ready: true,
+        inProgress: false,
+        deferred: false,
+        migratedToSchema: 2,
+        error: null,
+        lastResult: { alreadyMigrated: true, complete: true }
+      })
+      expect(await A.epochStatus()).toMatchObject({
+        legacy: true,
+        canRead: true
+      })
+      // The released build wrote A's device row unsigned. On open the
+      // re-key build signs it again, after which the row binds. That is the
+      // only row the upgrade changes.
+      await waitFor(
+        async () => (await A.epochStatus()).uncovered.length === 0,
+        { label: `A's own row binds in ${vault}` }
+      )
+      expectSameRowsBut(await rawView(A), before.raw, 'device/device-A')
+    }
 
     const started = await A.ensureEpoch({ start: true })
     expect(started).toMatchObject({ rotated: true, members: ['device-A'] })
     // Starting an epoch seals new writes only. Rows the released build
     // wrote stay plaintext and read as before.
-    expect(await readFilled(A)).toEqual(before)
+    expect(await readEverything(A)).toEqual(beforeV.read)
     expect(isSealed(await A.raw('note/1'))).toBe(false)
     await A.add('note/2', { text: 'sealed' })
     expect(isSealed(await A.raw('note/2'))).toBe(true)
     expect(await A.get('note/2')).toEqual({ text: 'sealed' })
   })
 
-  test('upgrade: an epoch start while the open-time re-sign is in flight is refused, then heals', async () => {
-    net = await createNetwork({ peers: ['A'], builds: { A: RELEASED } })
+  test('upgrade: a kick right after the upgrade is refused, then the owed start leaves the released device out', async () => {
+    net = await createNetwork({
+      peers: ['A', 'R'],
+      builds: { A: RELEASED, R: RELEASED }
+    })
     let { A } = net.peers
+    const { R } = net.peers
     await A.createVault({ id: 'v' })
     await A.add('note/1', { text: 'first' })
+    await R.pair(await A.invite())
+    for (const peer of [A, R]) {
+      await waitFor(async () => (await peer.devices()).length === 2, {
+        label: `${peer.id} sees both device rows`
+      })
+    }
     A = await net.swap('A')
 
-    // Called right after the vault opens, before the re-signed device row
-    // has landed: the roster still holds the released build's unsigned row,
-    // so A is not in it. The start is recorded as owed, and a write is
-    // refused until the start goes through.
-    expect(await A.ensureEpoch({ start: true })).toMatchObject({
-      rotated: false,
-      reason: 'self-not-in-roster'
-    })
+    // lib-vault's kickDevice starts with startLegacyEpoch. Called right after
+    // the vault opens, before the re-signed device row has landed, the
+    // roster still holds the released build's unsigned row for A, so A is
+    // not in it: the start is refused and the kick stops before it removes
+    // anything. The start stays owed, and a write is refused meanwhile.
+    // Cause: resignMyRows (epochStore.js:704) marks the row as re-signed
+    // before its add (:706) lands, so the start's own pass skips it.
+    await expect(startLegacyEpoch(A, 'kickDevice')).rejects.toThrow(
+      'kickDevice: cannot start the vault key: self-not-in-roster'
+    )
+    expect((await A.devices()).map((d) => d.id).sort()).toEqual([
+      'device-A',
+      'device-R'
+    ])
     await expect(A.add('note/2', { text: 'x' })).rejects.toThrow(
       'Vault key must rotate first'
     )
-    // The re-signed row's own update runs the owed start.
+    // The re-signed row's own update runs the owed start anyway: an epoch
+    // with A alone, which leaves the released device out.
     const healed = await waitFor(
       async () => {
         const status = await A.epochStatus()
@@ -219,10 +407,61 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
       },
       { label: 'the owed start runs' }
     )
-    expect(healed).toMatchObject({ seq: 1, members: ['device-A'] })
+    expect(healed).toMatchObject({
+      seq: 1,
+      members: ['device-A'],
+      uncovered: ['device-R']
+    })
     await A.add('note/2', { text: 'x' })
     expect(await A.get('note/2')).toEqual({ text: 'x' })
-    expect(await A.get('note/1')).toEqual({ text: 'first' })
+    await waitFor(() => R.raw('note/2'), { label: 'R holds note/2' })
+    expect(await R.get('note/2')).toMatchObject({ $enc: 1, e: healed.epoch })
+    expect(await R.get('note/1')).toEqual({ text: 'first' })
+  })
+
+  test('upgrade: a leave from a released device makes an upgraded device start an epoch without the other released devices', async () => {
+    net = await createNetwork({
+      peers: ['A', 'L', 'R'],
+      builds: { A: RELEASED, L: RELEASED, R: RELEASED }
+    })
+    let { A } = net.peers
+    const { L, R } = net.peers
+    await shareVault(net)
+    await A.add('note/1', { text: 'first' })
+    await converge(net.list, 'note/1')
+    A = await net.swap('A')
+    await waitFor(
+      async () =>
+        JSON.stringify((await A.epochStatus()).uncovered) ===
+        '["device-L","device-R"]',
+      { label: "A's own row binds" }
+    )
+    // Updates on a legacy vault start nothing: they only call
+    // ensureEpoch({ start: false }) (appDeps.js:632).
+    await R.add('note/r', { text: 'an update for A' })
+    await converge([A, R], 'note/r')
+    expect(await A.epochStatus()).toMatchObject({ legacy: true })
+
+    // L deletes the vault locally. The released lib-vault broadcasts a
+    // leave first (deleteVaultLocal.js at 24a94fc). The harness has no
+    // lib-vault, so A runs what leaveVaultActionHandler runs when the leave
+    // reaches it (leaveVault.js:34-50): startLegacyEpoch, the sweep, then
+    // ensureEpoch({ start: true }); Peer.kick is the sweep plus that call.
+    await L.closeVault()
+    await startLegacyEpoch(A, 'leave-vault')
+    const after = await A.kick('device-L')
+    expect(await A.epochStatus()).toMatchObject({
+      legacy: false,
+      members: ['device-A'],
+      uncovered: ['device-R']
+    })
+    expect(after).toMatchObject({ uncovered: ['device-R'] })
+
+    // R stayed, and from now on cannot read what A writes.
+    await A.add('note/after', { text: 'after the leave' })
+    await waitFor(() => R.raw('note/after'), { label: 'R holds note/after' })
+    expect(await R.get('note/after')).toMatchObject({ $enc: 1 })
+    expect(await R.get('note/1')).toEqual({ text: 'first' })
   })
 
   test('mixed: one of two released devices upgrades; both keep every item and writes cross both ways', async () => {
@@ -342,10 +581,10 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
       { label: 'C holds the epoch' }
     )
 
-    // B writes the new record and file through their v2 keys and edits the
-    // old note through its v1 key. Either way the twin R could read a
-    // gap in lands after a row R's reconcile skips, so R has nothing to
-    // copy; the next test covers the order where it does.
+    // B saves the new record and file through their v2 keys, as lib-vault
+    // does (v2 first, then the v1 projection). R's reconcile copies only
+    // v1 to v2, so a gap between the two appends gives it nothing to do.
+    // Edits of old records are the next tests.
     const sealedFile = crypto.randomBytes(2048)
     await B.add('record-v2/s1', sealedLogin)
     await B.add(
@@ -355,49 +594,41 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
       'g1.bin'
     )
     await B.add('note/s', { text: 'sealed note' })
-    await B.add('record/r2', noteEdit)
     // B's last append; B's log reaches R in order.
-    await waitFor(async () => isSealed(await R.raw('record-v2/r2')), {
-      label: 'R holds the sealed rows'
-    })
+    await waitFor(() => R.raw('note/s'), { label: 'R holds the sealed rows' })
     const writes = R.writes.length
     await reconciled(R)
 
     // R's reconcile over the epoch row and the sealed rows wrote nothing.
     expect(R.writes.slice(writes)).toEqual([])
-    // R reads what nobody edited since the epoch as before.
+    // R reads every item from before the epoch as before.
     const after = await readFilled(R)
-    for (const field of ['r1', 'note', 'file', 'fileV2']) {
-      expect(after[field]).toEqual(before[field])
-    }
-    // R cannot read what B sealed, the old note B edited included. It does
-    // not fail either: the released build hands the envelope out as if it
-    // were the value, the record list gets an entry with no id for each,
-    // and the file comes back as ciphertext.
+    expect({ ...after, ids: before.ids }).toEqual(before)
+    // R cannot read what B sealed. It does not fail either: the released
+    // build hands the envelope out as if it were the value, the record list
+    // gets an entry with no id, and the file comes back as ciphertext.
     const envelope = {
       $enc: 1,
       e: first.id,
       n: expect.any(String),
       c: expect.any(String)
     }
-    expect(after.r2).toEqual(envelope)
     expect(await R.get('record/s1')).toEqual(envelope)
     expect(await R.get('note/s')).toEqual(envelope)
     const listed = await R.list('record/')
-    expect(listed.map((r) => r.id)).toEqual(['r1', undefined, undefined])
-    expect(listed.slice(1)).toEqual([
-      expect.objectContaining({ $enc: 1, e: first.id }),
-      expect.objectContaining({ $enc: 1, e: first.id })
-    ])
+    expect(listed.map((r) => r.id)).toEqual(['r1', 'r2', undefined])
+    expect(listed[2]).toEqual(envelope)
     expect(JSON.stringify(listed)).not.toContain('Sealed')
     const cipher = Buffer.from(await R.getFile('record-v2/s1/file/g1'))
     expect(cipher.equals(sealedFile)).toBe(false)
     expect(cipher.includes(sealedFile.subarray(0, 64))).toBe(false)
 
     phase(net, 'R writes after the epoch')
-    // R still writes, in plaintext, and B and C read it.
+    // R still writes, in plaintext, and B and C read it. R saves through
+    // the v2 key, as its lib-vault does; the gap before its v1 projection
+    // gives the re-key reconcile nothing to do either.
     await R.add('note/r', { text: 'from the released build' })
-    await R.add('record/r1', login(9, 'Edited on R', 'p9'))
+    await R.add('record-v2/r1', { ...login(9, 'Edited on R', 'p9'), schema: 2 })
     expect(await converge(net.list, 'note/r')).toEqual({
       text: 'from the released build'
     })
@@ -412,9 +643,8 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
       expect(r1).toMatchObject({
         data: { title: 'Edited on R', password: 'p9' }
       })
-      // R's own rows are plaintext. The v2 twin of its edit may be B's or
-      // C's sealed one instead; the next test covers that.
       expect(isSealed(await peer.raw('note/r'))).toBe(false)
+      expect(isSealed(await peer.raw('record-v2/r1'))).toBe(false)
       expect(isSealed(await peer.raw('record/r1'))).toBe(false)
     }
 
@@ -426,7 +656,6 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
     })
     for (const peer of [B, C]) {
       expect(await peer.get('record/s1')).toEqual(sealedLogin)
-      expect(await peer.get('record-v2/r2')).toMatchObject(noteEdit)
       expect(await peer.get('note/s')).toEqual({ text: 'sealed note' })
       for (const key of ['record-v2/s1/file/g1', 'record/s1/file/g1']) {
         const bytes = await waitFor(() => peer.getFile(key), {
@@ -456,7 +685,6 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
     })
     expect(joined.seq).toBeGreaterThan(first.seq)
     expect(await R.get('record/s1')).toEqual(sealedLogin)
-    expect(await R.get('record-v2/r2')).toMatchObject(noteEdit)
     expect(
       Buffer.from(await R.getFile('record-v2/s1/file/g1')).equals(sealedFile)
     ).toBe(true)
@@ -473,12 +701,162 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
     })
   })
 
-  test('mixed: when one twin of a record lands late, the other build writes it', async () => {
-    // Two devices only, so the one twin the re-key build writes is B's.
-    net = await createNetwork({ peers: ['R', 'B'], builds: { R: RELEASED } })
+  test('mixed: a re-key device edits an old record the way the apps save it, v2 then v1', async () => {
+    net = await createNetwork({
+      peers: ['R', 'B'],
+      builds: { R: RELEASED },
+      onUpdate: countReconcile
+    })
     const { R, B } = net.peers
     const rErrors = watchErrors(R)
     await shareVault(net)
+    trackReconciles(B)
+    const old = (id) => ({
+      id,
+      type: 'note',
+      schema: 2,
+      updatedAt: 1,
+      data: { title: `Note ${id}`, note: 'old text' }
+    })
+    const edited = (id) => ({
+      ...old(id),
+      updatedAt: 7,
+      data: { title: `Note ${id}`, note: 'edited on B' }
+    })
+    for (const id of ['n1', 'n2', 'n3']) await R.add(`record-v2/${id}`, old(id))
+    await waitFor(async () => (await B.get('record/n3'))?.updatedAt === 1, {
+      label: 'B reads the old notes'
+    })
+    const first = await B.ensureEpoch({ start: true })
+    expect(first).toMatchObject({ rotated: true, members: ['device-B'] })
+    const envelope = {
+      $enc: 1,
+      e: first.id,
+      n: expect.any(String),
+      c: expect.any(String)
+    }
+
+    phase(net, 'both rows land before R reconciles')
+    // B saves n1 through record-v2/ (the core appends v2, then the v1
+    // projection). Both reach R before its reconcile lists the vault: R's
+    // reconcile writes nothing, and R reads the record as its envelope.
+    const listing = holdGets(R, 'vault-ext')
+    await B.add('record-v2/n1', edited('n1'))
+    await waitFor(async () => isSealed(await R.raw('record/n1')), {
+      label: 'R holds both sealed rows'
+    })
+    listing.release()
+    let writes = R.writes.length
+    await reconciled(R)
+    expect(R.writes.slice(writes)).toEqual([])
+    expect(await R.get('record/n1')).toEqual(envelope)
+    expect(await B.get('record/n1')).toEqual(edited('n1'))
+
+    // B saves n2 and n3 the same way, but the v1 projection reaches R more
+    // than one debounce (100 ms) after v2. R's reconcile then sees its own
+    // plaintext v1 (updatedAt 1) against a sealed v2, which the released
+    // mergeV1IntoV2 counts as updatedAt 0. v1 wins, and R writes a mixed
+    // row: B's new ciphertext with the old plaintext beside it.
+    const lagV1 = async (id) => {
+      const slowV1 = holdAdds(B, `record/${id}`)
+      const saving = B.add(`record-v2/${id}`, edited(id))
+      await slowV1.reached
+      await waitFor(async () => isSealed(await R.raw(`record-v2/${id}`)), {
+        label: `R holds B's sealed v2 of ${id}`
+      })
+      const sealedV2 = await rawJson(R, `record-v2/${id}`)
+      const before = R.writes.length
+      await reconciled(R)
+      expect(R.writes.slice(before)).toEqual([
+        { op: 'add', key: `record-v2/${id}` }
+      ])
+      // The v1 projection carries `websites: []`, and the merge derives
+      // `uris` from it.
+      const mixed = {
+        ...sealedV2,
+        ...old(id),
+        data: { ...old(id).data, websites: [], uris: [] }
+      }
+      expect(await rawJson(R, `record-v2/${id}`)).toEqual(mixed)
+      slowV1.release()
+      await saving
+      await waitFor(async () => isSealed(await R.raw(`record/${id}`)), {
+        label: `R holds B's sealed v1 of ${id}`
+      })
+      await waitFor(
+        async () => (await rawJson(B, `record-v2/${id}`))?.data !== undefined,
+        { label: `B holds R's mixed row for ${id}` }
+      )
+      return mixed
+    }
+
+    phase(net, 'v1 lands late: n2')
+    const mixed2 = await lagV1('n2')
+    phase(net, 'v1 lands late: n3')
+    const mixed3 = await lagV1('n3')
+    // Neither reconcile repairs it: the mixed row's updatedAt (1) is not
+    // below the sealed v1's on R (0), nor below B's edit (7) on B, where the
+    // mixed row decrypts to B's edit.
+    writes = R.writes.length
+    await reconciled(R)
+    await reconciled(B)
+    expect(R.writes.slice(writes)).toEqual([])
+    for (const [id, mixed] of [
+      ['n2', mixed2],
+      ['n3', mixed3]
+    ]) {
+      expect(await rawJson(B, `record-v2/${id}`)).toEqual(mixed)
+      // R reads the OLD record; B reads its edit.
+      expect(await R.get(`record/${id}`)).toEqual(mixed)
+      expect(await R.get(`record/${id}`)).toMatchObject(old(id))
+      expect(await B.get(`record/${id}`)).toEqual(edited(id))
+    }
+    expect((await R.list('record/')).map((r) => r.id)).toEqual([
+      undefined,
+      'n2',
+      'n3'
+    ])
+
+    phase(net, 'R edits the stale records')
+    // An edit on R starts from the old content R shows. Saved as fields the
+    // app rebuilt (no envelope fields), it replaces B's edit everywhere.
+    const fromR = (id) => ({
+      ...old(id),
+      updatedAt: 9,
+      data: { title: `Note ${id}`, note: 'old text, edited on R' }
+    })
+    await R.add('record-v2/n2', fromR('n2'))
+    // Saved as the listed record spread with new fields, it keeps B's
+    // envelope: B decrypts that and never sees R's edit, while R reads it.
+    await R.add('record-v2/n3', { ...mixed3, ...fromR('n3') })
+    await waitFor(
+      async () => (await rawJson(B, 'record/n3'))?.updatedAt === 9,
+      {
+        label: "B holds R's edits"
+      }
+    )
+    await reconciled(R)
+    await reconciled(B)
+    expect(await B.get('record/n2')).toEqual(fromR('n2'))
+    expect(await R.get('record/n2')).toEqual(fromR('n2'))
+    expect(await B.get('record/n3')).toEqual(edited('n3'))
+    expect(await R.get('record/n3')).toMatchObject(fromR('n3'))
+    expect(rErrors).toEqual([])
+  })
+
+  test('mixed: a client that saves record/ first races the other build for the v2 twin', async () => {
+    // No current app saves this way: lib-vault saves record-v2/ first (the
+    // test above). These orders need a client that writes record/ directly.
+    // Two devices only, so the one twin the re-key build writes is B's.
+    net = await createNetwork({
+      peers: ['R', 'B'],
+      builds: { R: RELEASED },
+      onUpdate: countReconcile
+    })
+    const { R, B } = net.peers
+    const rErrors = watchErrors(R)
+    await shareVault(net)
+    trackReconciles(B)
     await R.add('record/r1', login(1))
     await waitFor(async () => (await B.get('record/r1'))?.schema === 2, {
       label: 'B reads r1'
@@ -545,7 +923,8 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
     // Same start, but R's append is slow too and lands after B's twin, so
     // R's copy is the v2 row on both devices, and B reads the record
     // without `schema` and `uris`. Neither build's reconcile repairs it:
-    // both rows carry the same updatedAt, so mergeV1IntoV2 leaves them.
+    // both rows decrypt to the same updatedAt on B, and on R the envelope
+    // counts as 0 against R's own copy, so mergeV1IntoV2 leaves them.
     const slowB2 = holdAdds(B, 'record-v2/s2')
     const slowR = holdAdds(R, 'record-v2/s2')
     const writing2 = B.add('record/s2', login2)
@@ -568,6 +947,11 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
       })
       expect(await rawJson(peer, 'record-v2/s2')).toEqual(copy)
     }
+    writes = R.writes.length
+    await reconciled(R)
+    await reconciled(B)
+    expect(R.writes.slice(writes)).toEqual([])
+    expect(await rawJson(B, 'record-v2/s2')).toEqual(copy)
     expect(await B.get('record/s2')).toEqual(asV1(login2))
     expect((await B.list('record/')).find((r) => r.id === 's2')).toEqual(
       asV1(login2)
@@ -581,8 +965,10 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
     phase(net, "B's reconcile seals R's edit")
     // R edits an old record through its v1 key while its v2 twin is slow.
     // B's reconcile meets the newer v1 row and writes the merged v2 twin,
-    // sealed. When that lands after R's plaintext twin it is the v2 row,
-    // and R cannot read its own edit any more. B can.
+    // sealed, and it lands after R's plaintext twin. Until R reconciles
+    // (one debounce) R reads its own edit as an envelope. Then the
+    // envelope counts as updatedAt 0 against R's v1, R writes a mixed
+    // row, and both sides read R's edit.
     const edit = login(9, 'Edited on R', 'p9')
     const slowR2 = holdAdds(R, 'record-v2/r1')
     const slowB3 = holdAdds(B, 'record-v2/r1')
@@ -606,11 +992,21 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
       c: expect.any(String)
     })
     expect(JSON.parse((await R.raw('record/r1')).value)).toEqual(edit)
-    expect(await B.get('record/r1')).toMatchObject({
-      updatedAt: 9,
-      schema: 2,
-      data: { title: 'Edited on R', password: 'p9' }
-    })
+    const sealedTwin = await rawJson(R, 'record-v2/r1')
+    writes = R.writes.length
+    await reconciled(R)
+    expect(R.writes.slice(writes)).toEqual([{ op: 'add', key: 'record-v2/r1' }])
+    const editAsV2 = asV2(edit)
+    const mixedRow = { ...sealedTwin, ...editAsV2 }
+    expect(await rawJson(R, 'record-v2/r1')).toEqual(mixedRow)
+    expect(await R.get('record/r1')).toEqual(mixedRow)
+    expect(await R.get('record/r1')).toMatchObject(editAsV2)
+    await waitFor(
+      async () => (await rawJson(B, 'record-v2/r1'))?.data !== undefined,
+      { label: "B holds R's mixed row" }
+    )
+    await reconciled(B)
+    expect(await B.get('record/r1')).toEqual(editAsV2)
     expect(rErrors).toEqual([])
   })
 
@@ -803,6 +1199,9 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
       label: 'C holds note/r'
     })
     expect(leaked).toEqual({ text: 'from the released build' })
+    // C holds A's later row, sealed, and reads nothing from it.
+    await waitFor(() => C.raw('note/after'), { label: 'C holds note/after' })
+    expect(isSealed(await C.raw('note/after'))).toBe(true)
     expect(await C.get('note/after')).toBeNull()
     expect(rErrors).toEqual([])
   })
