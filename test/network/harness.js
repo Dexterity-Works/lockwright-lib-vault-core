@@ -121,7 +121,7 @@ export const createNetwork = async ({
         failure: test.failed ? { messages: test.messages } : null
       })
       // eslint-disable-next-line no-console
-      console.log(`timeline: ${timeline.txt}`)
+      console.log(`timeline: ${timeline.txt}\nreport: ${timeline.html}`)
     }
     if (!keep) removeDir(dir)
     try {
@@ -146,7 +146,7 @@ export const createNetwork = async ({
           failure: { messages: [error.message] }
         })
         // eslint-disable-next-line no-console
-        console.log(`timeline: ${timeline.txt}`)
+        console.log(`timeline: ${timeline.txt}\nreport: ${timeline.html}`)
       }
       throw error
     }

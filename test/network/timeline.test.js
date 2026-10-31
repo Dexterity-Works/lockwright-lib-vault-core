@@ -48,6 +48,8 @@ describe('timeline artifacts', () => {
     ])
     const json = JSON.parse(fs.readFileSync(out.json, 'utf8'))
     expect(json.failure).toEqual({ messages: ['boom'] })
+    expect(out.html).toBe(path.join(out.dir, 'report.html'))
+    expect(fs.readFileSync(out.html, 'utf8')).toContain('<pre>boom</pre>')
     expect(json.events).toHaveLength(3)
     expect(formatTimeline([])).toBe('')
     expect(slug('  Weird / Name!! ')).toBe('weird-name')
@@ -64,9 +66,9 @@ describe('timeline artifacts', () => {
         '--config',
         'jest.network.config.js',
         '--runInBand',
+        // --testMatch takes several globs; a path after it is one more.
         '--testMatch',
-        '**/test/network/fixtures/*.network.js',
-        'test/network/fixtures/failing.network.js'
+        '**/test/network/fixtures/failing.network.js'
       ],
       {
         cwd: root,
@@ -83,6 +85,11 @@ describe('timeline artifacts', () => {
       'forced-failure-fails-after-creating-a-vault'
     )
     expect(output).toContain(`timeline: ${path.join(dir, 'timeline.txt')}`)
+    expect(output).toContain(`report: ${path.join(dir, 'report.html')}`)
+    const html = fs.readFileSync(path.join(dir, 'report.html'), 'utf8')
+    expect(html).toContain('<section class="banner" role="alert">')
+    expect(html).toContain('nothing-like-it')
+    expect(html).toContain('peer.createVault')
     const txt = fs.readFileSync(path.join(dir, 'timeline.txt'), 'utf8')
     expect(txt).toContain('# failed:')
     expect(txt).toMatch(/\bA\s+peer\.createVault\b/)
