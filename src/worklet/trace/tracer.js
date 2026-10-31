@@ -73,18 +73,17 @@ const hex = (key) => {
  * direct / holepunched / relayed, from where the raw stream's packets go.
  * Nothing on the connection names the path (test/network/DEPS.md Recipes c).
  * A relayed stream rides the relay connection's socket and address, so
- * `relayAddresses` is where the known relays answered. `ridden(address)` is
- * the key of another stream dialed to that address, if any: a stream on
- * someone else's address that is not a known relay is `unknown`, never
- * `direct`.
+ * `relayAddresses` is where the known relays answered. `ridden(address,
+ * key)` is true while a stream dialed to another key is open on that
+ * address: a stream on someone else's address that is not a known relay is
+ * `unknown`, never `direct`.
  */
-export const classify = (conn, dht, relayAddresses, ridden = () => null) => {
+export const classify = (conn, dht, relayAddresses, ridden = () => false) => {
   const rs = conn.rawStream
   if (!rs || !rs.connected) return 'pending'
   const remote = `${rs.remoteHost}:${rs.remotePort}`
   if (relayAddresses.has(remote)) return 'relayed'
-  const owner = ridden(remote)
-  if (owner && owner !== hex(conn.remotePublicKey)) return 'unknown'
+  if (ridden(remote, hex(conn.remotePublicKey))) return 'unknown'
   if (dht._socketPool?.lookup(rs.socket)) return 'holepunched'
   if (rs.socket === dht.io.serverSocket || rs.socket === dht.io.clientSocket) {
     return 'direct'
@@ -129,7 +128,9 @@ export class Tracer {
     // Relay keys from the swarms' relayThrough and the dials' options; the
     // address a dial to one of them opens on is a relay address.
     this.relayKeys = new Set()
-    // Per DHT: remote address -> key of the dialed stream open on it.
+    // Per DHT: remote address -> key -> how many dialed streams to that key
+    // are open there. hyperdht dials a relay once per relayed connection,
+    // so one address holds several streams at once.
     this.dialed = new WeakMap()
     this.onEvent = onEvent
     this.events = keepEvents ? [] : null
@@ -262,16 +263,22 @@ export class Tracer {
         const rs = conn.rawStream
         if (!rs?.connected) return
         address = `${rs.remoteHost}:${rs.remotePort}`
-        // The first stream on an address owns it: a peer's stream that
-        // opens on its relay's address must not take the relay's place.
-        if (!dialed.has(address)) dialed.set(address, key)
+        if (!dialed.has(address)) dialed.set(address, new Map())
+        const keys = dialed.get(address)
+        keys.set(key, (keys.get(key) ?? 0) + 1)
         if (this.relayKeys.has(key)) {
           this.relayAddresses.add(address)
           this.record('relay.open', { label, remote, address })
         }
       })
       conn.once('close', () => {
-        if (address && dialed.get(address) === key) dialed.delete(address)
+        const keys = address ? dialed.get(address) : null
+        if (keys?.has(key)) {
+          const left = keys.get(key) - 1
+          if (left > 0) keys.set(key, left)
+          else keys.delete(key)
+          if (keys.size === 0) dialed.delete(address)
+        }
         if (opened) return
         const error = streamError(conn)
         this.record('conn.fail', {
@@ -455,12 +462,14 @@ export class Tracer {
         label,
         remote,
         initiator: conn.isInitiator,
-        path: classify(
-          conn,
-          dht,
-          this.relayAddresses,
-          (address) => this.dialed.get(dht)?.get(address) ?? null
-        ),
+        path: classify(conn, dht, this.relayAddresses, (address, key) => {
+          const keys = this.dialed.get(dht)?.get(address)
+          if (!keys) return false
+          for (const [other, open] of keys) {
+            if (other !== key && open > 0) return true
+          }
+          return false
+        }),
         socket: socketName(rs?.socket, dht),
         remoteAddress: rs?.connected
           ? `${rs.remoteHost}:${rs.remotePort}`

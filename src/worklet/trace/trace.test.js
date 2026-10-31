@@ -257,6 +257,42 @@ describe('worklet tracer', () => {
       return tracer.events.filter((e) => e.event === 'conn.open')
     }
 
+    // hyperdht dials the relay again for each relayed connection; the first
+    // relay dial closing must not leave the address looking free.
+    const twoPeers = () => {
+      const tracer = memoryTracer()
+      const swarm = fakeSwarm()
+      swarm.dht.connect = (key) =>
+        stream(key, '10.0.0.9', 4000, swarm.dht.io.clientSocket)
+      tracer.attachSwarm('vault', swarm)
+      const relayA = swarm.dht.connect(relayKey)
+      relayA.emit('open')
+      const peerA = swarm.dht.connect(peerKey)
+      peerA.emit('open')
+      swarm.emit('connection', peerA)
+      const relayB = swarm.dht.connect(relayKey)
+      relayB.emit('open')
+      relayA.emit('close')
+      peerA.emit('close')
+      const peerB = swarm.dht.connect(otherKey)
+      peerB.emit('open')
+      swarm.emit('connection', peerB)
+      relayB.emit('close')
+      peerB.emit('close')
+      const peerC = swarm.dht.connect(peerKey)
+      peerC.emit('open')
+      swarm.emit('connection', peerC)
+      tracer.close()
+      return tracer.events
+        .filter((e) => e.event === 'conn.open')
+        .map((e) => `${e.remote}:${e.path}`)
+    }
+    expect(twoPeers()).toEqual([
+      '04040404:unknown',
+      '05050505:unknown',
+      '04040404:direct'
+    ])
+
     const known = run(() => [relayKey])
     expect(known.map((e) => e.path)).toEqual(['relayed', 'direct'])
     // A relay the tracer cannot name: unknown, not direct.
