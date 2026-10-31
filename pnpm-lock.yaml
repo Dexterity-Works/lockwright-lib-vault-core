@@ -264,6 +264,9 @@ importers:
       framed-stream:
         specifier: ^1.0.1
         version: 1.0.1
+      hypercore:
+        specifier: ^11.39.6
+        version: 11.39.6(bare-buffer@3.6.2)(bare-url@2.4.7)
       hypercore-id-encoding:
         specifier: ^1.3.0
         version: 1.3.0
@@ -277,8 +280,8 @@ importers:
         specifier: ^9.5.0
         version: 9.5.1
       rocksdb-native:
-        specifier: ^3.11.4
-        version: 3.17.3(bare-url@2.4.7)
+        specifier: ^3.19.2
+        version: 3.19.2(bare-url@2.4.7)
       sentry-bare:
         specifier: ^0.2.0
         version: 0.2.1(bare-buffer@3.6.2)(bare-events@2.9.1)(bare-pipe@4.2.3(bare-buffer@3.6.2))
@@ -2454,11 +2457,11 @@ packages:
   hypercore-id-encoding@1.3.0:
     resolution: {integrity: sha512-W6sHdGo5h7LXEsoWfKf/KfuROZmZRQDlGqJF2EPHW+noCK66Vvr0+zE6cL0vqQi18s0kQPeN7Sq3QyR0Ytc2VQ==}
 
-  hypercore-storage@3.2.0:
-    resolution: {integrity: sha512-i5O5ZMkdZaNAWGuNRXUZjuzv7B41OIhDHUwLCZPjucgVmywY0ZE5PDafu6e5oPuhtghjl6S8q6Jn+POVKN2BvQ==}
+  hypercore-storage@3.4.0:
+    resolution: {integrity: sha512-qwqW0QSH2YQW0/7T8WdHSmQBPqz3IbGcbqysJnnYgPvIp17Qr0CFD7bRGC/b9vo4FPBiW4QV9vytmkfCYJRr9A==}
 
-  hypercore@11.35.1:
-    resolution: {integrity: sha512-Oy3cfRfTBkiDSwewBicF8S97fNnon4RWYidthhQK+UB0z4SR85sfMqPtrNXQFIUt9e6i5W/vJHPfzd0lj0ZYtg==}
+  hypercore@11.39.6:
+    resolution: {integrity: sha512-9zAsZnSuwxL555eb6cIs2KLpgYsAJ6+nUyjOcu7VtSNmFjXDXzEl6sVW6t1398uL942EONcgeQxI1lgSSM9e1w==}
 
   hyperdb@4.22.3:
     resolution: {integrity: sha512-CZifHGDiOKQbZLWQL7pH0Sct3AjmXG96MeZdE6Y8YH5vBqKif22YhfmaVk35ko/maXCl68jM/uFYUB62hxgA4w==}
@@ -3253,8 +3256,8 @@ packages:
   resource-on-exit@1.0.0:
     resolution: {integrity: sha512-ViJwJAknCkLRJRPR+9SISQQ7R5eRgtdIHLJsM2hHx1MweAJbJxJ5XnMjjq0Lc7ZGv44ufzAqds1nKxiVkdy4ag==}
 
-  rocksdb-native@3.17.3:
-    resolution: {integrity: sha512-bvwfA5QTPZuR4Kb8fU7RPbUHhNJyBZHaZG4IwmM7G1+BjPeOfVeKH+5vM4ylp4F2JDn667B4VxlkWK1+F6o6+A==}
+  rocksdb-native@3.19.2:
+    resolution: {integrity: sha512-QNiKvb4+WocuFkTzMkKdU33qTmV4ymVvMwbsY78nJqpz5vInhb6qse/Q+mIJwMICdkNzu0MHKIvz3/WnYkJ8RQ==}
     engines: {bare: '>=1.16.0'}
 
   safe-array-concat@1.1.4:
@@ -5151,7 +5154,7 @@ snapshots:
       debounceify: 1.1.0
       encryption-encoding: 1.0.3(bare-buffer@3.6.2)
       hyperbee: 2.27.3
-      hypercore: 11.35.1(bare-buffer@3.6.2)(bare-url@2.4.7)
+      hypercore: 11.39.6(bare-buffer@3.6.2)(bare-url@2.4.7)
       hypercore-crypto: 3.7.0(bare-buffer@3.6.2)(bare-events@2.9.1)(bare-url@2.4.7)
       hypercore-id-encoding: 1.3.0
       hyperschema: 1.22.0(bare-buffer@3.6.2)
@@ -5182,7 +5185,7 @@ snapshots:
       blind-peering: 1.15.0(bare-buffer@3.6.2)(bare-url@2.4.7)
       corestore: 7.12.0(bare-buffer@3.6.2)(bare-url@2.4.7)
       hyperbee: 2.27.3
-      hypercore: 11.35.1(bare-buffer@3.6.2)(bare-url@2.4.7)
+      hypercore: 11.39.6(bare-buffer@3.6.2)(bare-url@2.4.7)
       hypercore-id-encoding: 1.3.0
       hyperdb: 4.22.3(bare-buffer@3.6.2)(bare-url@2.4.7)
       hyperdispatch: 1.6.0(bare-buffer@3.6.2)
@@ -5824,7 +5827,7 @@ snapshots:
     dependencies:
       b4a: 1.8.1
       bare-events: 2.9.1
-      hypercore: 11.35.1(bare-buffer@3.6.2)(bare-url@2.4.7)
+      hypercore: 11.39.6(bare-buffer@3.6.2)(bare-url@2.4.7)
       hypercore-crypto: 3.7.0(bare-buffer@3.6.2)(bare-events@2.9.1)(bare-url@2.4.7)
       hypercore-errors: 1.5.0
       hypercore-id-encoding: 1.3.0
@@ -6640,7 +6643,7 @@ snapshots:
     transitivePeerDependencies:
       - react-native-b4a
 
-  hypercore-storage@3.2.0(bare-buffer@3.6.2)(bare-events@2.9.1)(bare-url@2.4.7):
+  hypercore-storage@3.4.0(bare-buffer@3.6.2)(bare-events@2.9.1)(bare-url@2.4.7):
     dependencies:
       b4a: 1.8.1
       bare-path: 3.1.1
@@ -6651,7 +6654,7 @@ snapshots:
       hyperschema: 1.22.0(bare-buffer@3.6.2)
       index-encoder: 3.5.0
       resolve-reject-promise: 1.1.0
-      rocksdb-native: 3.17.3(bare-url@2.4.7)
+      rocksdb-native: 3.19.2(bare-url@2.4.7)
       scope-lock: 1.2.4
       streamx: 2.28.0
       xache: 1.3.0
@@ -6663,7 +6666,7 @@ snapshots:
       - react-native-b4a
       - sodium-javascript
 
-  hypercore@11.35.1(bare-buffer@3.6.2)(bare-url@2.4.7):
+  hypercore@11.39.6(bare-buffer@3.6.2)(bare-url@2.4.7):
     dependencies:
       '@hyperswarm/secret-stream': 6.9.1(bare-buffer@3.6.2)(bare-events@2.9.1)(bare-url@2.4.7)
       b4a: 1.8.1
@@ -6675,7 +6678,7 @@ snapshots:
       hypercore-crypto: 3.7.0(bare-buffer@3.6.2)(bare-events@2.9.1)(bare-url@2.4.7)
       hypercore-errors: 1.5.0
       hypercore-id-encoding: 1.3.0
-      hypercore-storage: 3.2.0(bare-buffer@3.6.2)(bare-events@2.9.1)(bare-url@2.4.7)
+      hypercore-storage: 3.4.0(bare-buffer@3.6.2)(bare-events@2.9.1)(bare-url@2.4.7)
       is-options: 1.0.2
       nanoassert: 2.0.0
       protomux: 3.11.0
@@ -6703,7 +6706,7 @@ snapshots:
       hyperschema: 1.22.0(bare-buffer@3.6.2)
       index-encoder: 3.5.0
       refcounter: 1.0.0
-      rocksdb-native: 3.17.3(bare-url@2.4.7)
+      rocksdb-native: 3.19.2(bare-url@2.4.7)
       scope-lock: 1.2.4
       streamx: 2.28.0
     transitivePeerDependencies:
@@ -6719,11 +6722,11 @@ snapshots:
       generate-object-property: 2.0.0
       generate-string: 1.0.1
       hyperbee: 2.27.3
-      hypercore: 11.35.1(bare-buffer@3.6.2)(bare-url@2.4.7)
+      hypercore: 11.39.6(bare-buffer@3.6.2)(bare-url@2.4.7)
       hyperschema: 1.22.0(bare-buffer@3.6.2)
       index-encoder: 3.5.0
       refcounter: 1.0.0
-      rocksdb-native: 3.17.3(bare-url@2.4.7)
+      rocksdb-native: 3.19.2(bare-url@2.4.7)
       scope-lock: 1.2.4
       streamx: 2.28.0
     transitivePeerDependencies:
@@ -7835,7 +7838,7 @@ snapshots:
 
   resource-on-exit@1.0.0: {}
 
-  rocksdb-native@3.17.3(bare-url@2.4.7):
+  rocksdb-native@3.19.2(bare-url@2.4.7):
     dependencies:
       compact-encoding: 3.3.0
       ready-resource: 1.2.0
