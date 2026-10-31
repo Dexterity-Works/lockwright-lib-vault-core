@@ -244,17 +244,27 @@ export class Tracer {
       const started = now()
       let opened = false
       let address = null
+      // hyperswarm passes the key or keys it chose; [] or null is none, and
+      // a function is not called here, so it is not known.
+      const rt = opts?.relayThrough
       this.record('conn.attempt', {
         label,
         remote,
-        relayed: !!opts?.relayThrough
+        relayed:
+          typeof rt === 'function'
+            ? null
+            : Array.isArray(rt)
+              ? rt.length > 0
+              : !!rt
       })
       conn.once('open', () => {
         opened = true
         const rs = conn.rawStream
         if (!rs?.connected) return
         address = `${rs.remoteHost}:${rs.remotePort}`
-        dialed.set(address, key)
+        // The first stream on an address owns it: a peer's stream that
+        // opens on its relay's address must not take the relay's place.
+        if (!dialed.has(address)) dialed.set(address, key)
         if (this.relayKeys.has(key)) {
           this.relayAddresses.add(address)
           this.record('relay.open', { label, remote, address })

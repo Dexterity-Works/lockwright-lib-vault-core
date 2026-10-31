@@ -35,7 +35,7 @@ The main events:
 
 | event | when |
 |---|---|
-| `conn.attempt` | an outgoing connect: `remote`, `relayed` |
+| `conn.attempt` | an outgoing connect: `remote`; `relayed` is true when a relay key was passed, false for none, null when a function picks it |
 | `conn.fail` | an attempt that closed without opening: `code` (`PEER_NOT_FOUND`, `HOLEPUNCH_ABORTED`, ...), `ms` |
 | `conn.open`, `conn.upgrade`, `conn.close` | `path` is `direct`, `holepunched`, `relayed` or `unknown`; `remoteAddress`; `conn.close` has the error `code` |
 | `relay.open` | a connection to a blind relay opened; connections on its `address` are `relayed` |

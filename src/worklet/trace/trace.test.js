@@ -99,6 +99,11 @@ describe('worklet trace switch', () => {
     expect(swarm.join).not.toBe(before.join)
     expect(swarm.dht.connect).not.toBe(before.connect)
     swarm.dht.connect(Buffer.alloc(32, 2), { relayThrough: () => null })
+    swarm.dht.connect(Buffer.alloc(32, 2), { relayThrough: [] })
+    swarm.dht.connect(Buffer.alloc(32, 2), {
+      relayThrough: [Buffer.alloc(32, 7)]
+    })
+    swarm.dht.connect(Buffer.alloc(32, 2), { relayThrough: null })
 
     await configureTrace({ traceFile: null })
     expect(getTracer()).toBeNull()
@@ -114,12 +119,20 @@ describe('worklet trace switch', () => {
       'dht.stats',
       'swarm.stats',
       'swarm.peers',
+      'conn.attempt',
+      'conn.attempt',
+      'conn.attempt',
       'conn.attempt'
+    ])
+    expect(lines.slice(-4).map((e) => e.relayed)).toEqual([
+      null,
+      false,
+      true,
+      false
     ])
     expect(lines.at(-1)).toMatchObject({
       label: 'personalSwarm',
-      remote: '02020202',
-      relayed: true
+      remote: '02020202'
     })
     expect(lines[1].key).toBe('01010101')
   })
@@ -231,10 +244,11 @@ describe('worklet tracer', () => {
       // hyperdht dials the relay itself, then the app stream rides it.
       swarm.dht.connect(relayKey)
       dials[0].emit('open')
-      swarm.emit(
-        'connection',
-        stream(peerKey, '10.0.0.9', 4000, swarm.dht.io.clientSocket)
-      )
+      // The app's own dial to the peer opens on the relay's address before
+      // hyperswarm hands it out as a connection.
+      const peer = swarm.dht.connect(peerKey)
+      peer.emit('open')
+      swarm.emit('connection', peer)
       swarm.emit(
         'connection',
         stream(otherKey, '10.0.0.7', 5000, swarm.dht.io.serverSocket)
