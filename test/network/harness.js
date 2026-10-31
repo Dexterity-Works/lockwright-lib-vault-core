@@ -23,7 +23,8 @@ export const loadIsolatedModules = () => {
       network: require('../../src/worklet/utils/swarm'),
       personalSwarm: require('../../src/worklet/personalSwarm'),
       dht: require('../../src/worklet/utils/dht'),
-      logger: require('../../src/worklet/utils/workletLogger')
+      logger: require('../../src/worklet/utils/workletLogger'),
+      trace: require('../../src/worklet/trace')
     }
   })
   return modules
@@ -121,7 +122,7 @@ export const createNetwork = async ({
         failure: test.failed ? { messages: test.messages } : null
       })
       // eslint-disable-next-line no-console
-      console.log(`timeline: ${timeline.txt}`)
+      console.log(`timeline: ${timeline.txt}\nreport: ${timeline.html}`)
     }
     if (!keep) removeDir(dir)
     try {
@@ -146,7 +147,7 @@ export const createNetwork = async ({
           failure: { messages: [error.message] }
         })
         // eslint-disable-next-line no-console
-        console.log(`timeline: ${timeline.txt}`)
+        console.log(`timeline: ${timeline.txt}\nreport: ${timeline.html}`)
       }
       throw error
     }

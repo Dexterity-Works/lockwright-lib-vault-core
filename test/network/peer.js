@@ -9,7 +9,7 @@ export class Peer {
   /**
    * @param {{
    *   id: string,
-   *   modules: { appDeps: object, network: object, personalSwarm?: object, dht?: object, logger?: object },
+   *   modules: { appDeps: object, network: object, personalSwarm?: object, dht?: object, logger?: object, trace?: object },
    *   bootstrap: Array<{ host: string, port: number }>,
    *   relayThrough?: Array<Buffer> | Function | null,
    *   dir: string,
@@ -57,6 +57,9 @@ export class Peer {
   async start() {
     fs.mkdirSync(this.dir, { recursive: true })
     await this.appDeps.setStoragePath(this.dir)
+    // The worklet traces through its own hooks, as an app with a traceFile
+    // does: networkCreated, epoch status, migration and pairing.
+    this.modules.trace?.setTracer(this.tracer)
     this.network.setNetworkOverrides({
       bootstrap: this.bootstrap,
       relayThrough: this.relayThrough,
@@ -72,17 +75,9 @@ export class Peer {
             return done
           }
         }
-        // appDeps builds the master vault and the active vault alike; the
-        // master vault is the only one built while start() runs.
-        const traced =
-          label === 'autopass' ? (this.started ? 'vault' : 'master') : label
-        this.tracer?.attach(traced, instance)
         this.onCreate?.(label, instance, this)
       }
     })
-    this.appDeps.setEpochStatusListener((status) =>
-      this.tracer?.epochStatus(status)
-    )
     this.trace('peer.start', { dir: this.dir })
     await this.appDeps.masterVaultInit({
       encryptionKey: this.masterKey,
@@ -361,8 +356,8 @@ export class Peer {
     this.destroying = []
     this.unsubscribeEnvelope?.()
     this.unsubscribeEnvelope = null
-    this.appDeps.setEpochStatusListener(null)
     this.network.setNetworkOverrides(null)
+    this.modules.trace?.setTracer(null)
     this.tracer?.close()
     if (!keep) fs.rmSync(this.dir, { recursive: true, force: true })
   }

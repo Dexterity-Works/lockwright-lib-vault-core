@@ -25,6 +25,8 @@ import { PearPassPairer } from './pearpassPairer'
 import { RateLimiter } from './rateLimiter'
 import { workletLogger } from './utils/workletLogger'
 import { OTP_TYPE } from '../constants/otpType'
+import { trace, getTracer } from './trace/index.js'
+import { short } from './trace/tracer.js'
 import { getConfig, networkCreated, networkOptions } from './utils/swarm'
 import { validateAndSanitizePath } from './validateAndSanitizePath'
 import { defaultMirrorKeys } from '../constants/defaultBlindMirrors'
@@ -492,6 +494,7 @@ const refreshPreviousV1RecordIds = async (skipIds, store) => {
 const runVaultMigration = async (store = epochStore) => {
   const switched = () => store !== epochStore
   skippedAtEpoch = undefined
+  trace('migration.start')
   vaultMigrationStatus = {
     ...vaultMigrationStatus,
     ready: false,
@@ -519,7 +522,13 @@ const runVaultMigration = async (store = epochStore) => {
 
     const skipped =
       !(result.complete || result.alreadyMigrated) && adapter.skipIds.size > 0
-    if (skipped) skippedAtEpoch = epoch
+    if (skipped) {
+      skippedAtEpoch = epoch
+      trace('migration.skipped', {
+        rows: adapter.skipIds.size,
+        skippedAtEpoch: short(epoch)
+      })
+    }
     // Rows it skipped under a latest epoch it cannot open yet: nothing was
     // written, so no write threw. Under a readable latest epoch it ends as
     // incomplete instead. Both reads: a key can land during the listing, or
@@ -527,6 +536,7 @@ const runVaultMigration = async (store = epochStore) => {
     if (skipped && (!canRead || !(await store.status()).canRead)) {
       if (switched()) return
       migrationDeferred = true
+      trace('migration.deferred', { reason: EPOCH_KEY_PENDING })
       vaultMigrationStatus = {
         ready: false,
         inProgress: false,
@@ -540,6 +550,14 @@ const runVaultMigration = async (store = epochStore) => {
 
     const vaultExt = (await adapter.getJson(VAULT_EXT_KEY)) || {}
     if (switched()) return
+    trace('migration.finish', {
+      complete: result.complete,
+      alreadyMigrated: result.alreadyMigrated,
+      recordsWritten: result.recordsWritten,
+      filesCopied: result.filesCopied,
+      missingRecords: result.missingRecordIds?.length ?? 0,
+      missingFiles: result.missingFileKeys?.length ?? 0
+    })
     vaultMigrationStatus = {
       ready: result.complete || result.alreadyMigrated,
       inProgress: false,
@@ -565,6 +583,10 @@ const runVaultMigration = async (store = epochStore) => {
     if (!migrationDeferred) {
       workletLogger.error('runVaultMigration failed', error)
     }
+    trace(migrationDeferred ? 'migration.deferred' : 'migration.error', {
+      reason: migrationDeferred ? EPOCH_KEY_PENDING : null,
+      error: error?.name ?? null
+    })
     vaultMigrationStatus = {
       ready: false,
       inProgress: false,
@@ -649,6 +671,10 @@ const runEpochSync = async ({ ensure }) => {
       // defers or skips rows. A device that can read and write but still
       // cannot rotate (its own row is gone, say) defers again and reruns on
       // each update; the run stops at its first write, so that is accepted.
+      trace('migration.resume', {
+        deferred: migrationDeferred,
+        skippedAtEpoch: short(skippedAtEpoch)
+      })
       migrationDeferred = false
       skippedAtEpoch = undefined
       // runVaultMigration logs and records its own failure.
@@ -677,7 +703,9 @@ const runEpochSync = async ({ ensure }) => {
       members,
       uncovered
     })
-    if (store !== epochStore || json === lastEpochStatusJson) return
+    if (store !== epochStore) return
+    getTracer()?.epochStatus(status)
+    if (json === lastEpochStatusJson) return
     if (!epochStatusListener) return
     // Recorded only once delivered, so a missing or failing listener gets
     // the same status on the next update.
@@ -809,7 +837,8 @@ export const initInstance = async ({ path, hashedPassword, encryptionKey }) => {
             : undefined,
           relayThrough: conf.current.blindRelays
         })
-      )
+      ),
+      traceRole(path)
     )
 
     await instance.ready()
@@ -819,6 +848,16 @@ export const initInstance = async ({ path, hashedPassword, encryptionKey }) => {
     throw new Error(`Error initializing instance: ${error.message}`)
   }
 }
+
+/** The tracer's name for an Autopass built under `path`. */
+const traceRole = (path) =>
+  path === 'vaults'
+    ? 'master'
+    : path === 'encryption'
+      ? 'encryption'
+      : path.startsWith('vault/')
+        ? 'vault'
+        : 'autopass'
 
 /**
  * @param {Object} params
@@ -867,7 +906,8 @@ export const initInstanceWithNewBlindEncryption = async ({
           ),
           relayThrough: conf.current.blindRelays
         })
-      )
+      ),
+      traceRole(path)
     )
 
     await instance.ready()
@@ -1432,6 +1472,9 @@ export const vaultRemove = async (key) => {
   }
 
   await epochStore.remove(key)
+  if (typeof key === 'string' && key.startsWith('device/')) {
+    trace('device.remove', { device: short(key.slice('device/'.length)) })
+  }
 
   const vaultExt = (await activeVaultGetRaw(VAULT_EXT_KEY)) || {}
   const blockV1DeleteMirror = vaultExt.blockV1DeleteMirror === true
@@ -1482,6 +1525,7 @@ export const vaultRemoveWriter = async (writerKey) => {
   // defaults to UTF-8 for strings. We store/transport writerKey as hex,
   // so decode here to the raw 32-byte ed25519 public key autobase needs.
   await activeVaultInstance.removeWriter(b4a.from(writerKey, 'hex'))
+  trace('writer.remove', { writer: short(writerKey) })
 }
 
 /**
@@ -1546,7 +1590,13 @@ export const activeVaultEnsureEpoch = async ({ start = false } = {}) => {
   if (!isActiveVaultInitialized || !epochStore) {
     throw new Error('Vault not initialised')
   }
-  return epochStore.ensureEpoch({ start })
+  const result = await epochStore.ensureEpoch({ start })
+  trace('epoch.ensure', {
+    start,
+    rotated: result?.rotated ?? null,
+    reason: result?.reason ?? null
+  })
+  return result
 }
 
 /**
@@ -1662,6 +1712,7 @@ export const createInvite = async () => {
   const parsedVault = JSON.parse(vault)
 
   const vaultId = parsedVault.id
+  trace('pairing.invite', { vault: short(vaultId) })
 
   return `${vaultId}/${inviteCode}`
 }
@@ -1689,6 +1740,7 @@ export const pairActiveVault = async (inviteCode) => {
 
   try {
     const [vaultId, inviteKey] = inviteCode.split('/')
+    trace('pairing.pair', { vault: short(vaultId) })
     if (isActiveVaultInitialized) {
       await closeActiveVaultInstance()
     }
@@ -1697,8 +1749,10 @@ export const pairActiveVault = async (inviteCode) => {
       buildPath(`vault/${vaultId}`),
       inviteKey
     )
+    trace('pairing.paired', { vault: short(vaultId) })
     return { vaultId, encryptionKey }
   } catch (error) {
+    trace('pairing.fail', { error: error?.code ?? error?.name ?? null })
     if (wasActive) {
       try {
         await restartActiveVault()
@@ -1711,6 +1765,7 @@ export const pairActiveVault = async (inviteCode) => {
 }
 
 export const cancelPairActiveVault = async () => {
+  trace('pairing.cancel')
   await pearpassPairer.cancelPairing()
 }
 

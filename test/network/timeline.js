@@ -1,6 +1,8 @@
 import fs from 'fs'
 import path from 'path'
 
+import { writeReport } from '../../scripts/trace-report/render.cjs'
+
 /** Where failed runs leave their timelines; gitignored. */
 export const artifactsRoot = () =>
   process.env.LOCKWRIGHT_NET_ARTIFACTS ||
@@ -42,9 +44,10 @@ export const formatTimeline = (events) => {
 }
 
 /**
- * Merge per-peer JSONL traces into `<root>/<test slug>/timeline.{json,txt}`.
+ * Merge per-peer JSONL traces into `<root>/<test slug>/timeline.{json,txt}`
+ * and a self-contained report.html beside them.
  * @param {{ name: string, files: string[], failure?: object | null, root?: string }} options
- * @returns {{ dir: string, json: string, txt: string, events: object[] }}
+ * @returns {{ dir: string, json: string, txt: string, html: string, events: object[] }}
  */
 export const writeTimeline = ({ name, files, failure = null, root }) => {
   const events = files
@@ -63,5 +66,11 @@ export const writeTimeline = ({ name, files, failure = null, root }) => {
     ''
   ].join('\n')
   fs.writeFileSync(txt, `${header}${formatTimeline(events)}\n`)
-  return { dir, json, txt, events }
+  const html = writeReport({
+    out: path.join(dir, 'report.html'),
+    title: name,
+    failure,
+    traces: [{ name: 'trace', events }]
+  })
+  return { dir, json, txt, html, events }
 }

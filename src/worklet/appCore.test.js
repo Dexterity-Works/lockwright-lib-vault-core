@@ -140,6 +140,10 @@ jest.mock('./utils/workletLogger', () => ({
   }
 }))
 
+jest.mock('./trace/index.js', () => ({
+  configureTrace: jest.fn()
+}))
+
 jest.mock('../utils/validateInviteCode', () => ({
   validateInviteCode: jest.fn((code) => code)
 }))
@@ -266,7 +270,8 @@ jest.mock('./api', () => {
     ENCRYPTION_DECRYPT_BITWARDEN_EXPORT: 63,
     ACTIVE_VAULT_ENSURE_EPOCH: 83,
     ACTIVE_VAULT_GET_EPOCH_STATUS: 84,
-    ON_EPOCH_STATUS: 85
+    ON_EPOCH_STATUS: 85,
+    SET_LOG_OPTIONS: 60
   }
 
   const API_BY_VALUE = Object.entries(API).reduce((acc, [key, value]) => {
@@ -313,6 +318,7 @@ import {
   EpochRotationPendingError,
   writeErrorMessage
 } from './epoch/keyring'
+import { configureTrace } from './trace/index.js'
 import { isPearWorker } from './utils/isPearWorker'
 import { parseRequestData } from './utils/parseRequestData'
 import { receiveFileStream } from '../utils/recieveFileStream'
@@ -1677,6 +1683,46 @@ describe('createRPC', () => {
     expect(JSON.parse(send.mock.calls[0][0])).toEqual({
       epoch: 'e1',
       legacy: false
+    })
+  })
+})
+
+describe('SET_LOG_OPTIONS trace file', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  const setLogOptions = async (data) => {
+    parseRequestData.mockReturnValue(data)
+    const reply = jest.fn()
+    await handleRpcCommand({ command: API.SET_LOG_OPTIONS, data, reply })
+    return JSON.parse(reply.mock.calls[0][0])
+  }
+
+  test('without traceFile the trace is not touched', async () => {
+    expect(await setLogOptions({ logLevel: 'debug', dev: true })).toEqual({
+      data: null
+    })
+    expect(configureTrace).not.toHaveBeenCalled()
+  })
+
+  test('a traceFile starts the trace, null stops it', async () => {
+    await setLogOptions({ traceFile: '/logs/trace.jsonl', traceFileMaxSize: 9 })
+    expect(configureTrace).toHaveBeenCalledWith({
+      traceFile: '/logs/trace.jsonl',
+      traceFileMaxSize: 9
+    })
+    await setLogOptions({ traceFile: null })
+    expect(configureTrace).toHaveBeenLastCalledWith({
+      traceFile: null,
+      traceFileMaxSize: undefined
+    })
+  })
+
+  test('a trace file that cannot open still replies', async () => {
+    configureTrace.mockRejectedValueOnce(new Error('EACCES'))
+    expect(await setLogOptions({ traceFile: '/nope/trace.jsonl' })).toEqual({
+      data: null
     })
   })
 })

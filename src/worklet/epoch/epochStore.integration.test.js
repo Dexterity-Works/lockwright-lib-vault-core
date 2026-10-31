@@ -2157,6 +2157,25 @@ describe('epochStore over real Autopass', () => {
     expect((await A.instance.get('record/r')).value).toBe('v')
   })
 
+  it('never signs a row with my writer key that names another device key', async () => {
+    const [A, B] = await setup(['A', 'B'])
+    await A.store.ensureEpoch({ start: true })
+    const outsider = makeKeyPair()
+    await A.store.add(
+      'device/X',
+      JSON.stringify(rowFor('X', outsider, A.instance.writerKey))
+    )
+
+    expect(JSON.parse((await A.instance.get('device/X')).value).sig).toBe(
+      undefined
+    )
+    const result = await A.store.ensureEpoch({ start: false })
+    expect(result.members ?? ['A', 'B']).toEqual(['A', 'B'])
+    expect((await A.store.status()).members).toEqual(['A', 'B'])
+    await sync(A, B)
+    expect((await B.store.status()).members).not.toContain('X')
+  })
+
   it('refuses a write but still reads while the view never holds still', async () => {
     const [A] = await setup(['A'])
     await A.store.ensureEpoch({ start: true })

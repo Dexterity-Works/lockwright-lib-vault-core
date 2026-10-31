@@ -87,6 +87,7 @@ import {
   personalSwarmOnEnvelope
 } from './personalSwarm'
 import { withMirrorValidation } from '../middleware/validateMirrorKeyViaDHT.js'
+import { configureTrace } from './trace/index.js'
 import { destroySharedDHT } from './utils/dht'
 import { receiveFileStream } from '../utils/recieveFileStream.js'
 import { sendFileStream } from '../utils/sendFileStream.js'
@@ -1372,12 +1373,23 @@ export const handleRpcCommand = async (req) => {
       break
 
     case API.SET_LOG_OPTIONS: {
-      const { logFile, logLevel, dev, sentryDsn } = requestData ?? {}
+      const { logFile, logLevel, dev, sentryDsn, traceFile, traceFileMaxSize } =
+        requestData ?? {}
       workletLogger.configure({
         logFile,
         logLevel,
         dev: !!dev
       })
+      // Opt-in sync trace (docs/tracing.md); absent leaves it as it was.
+      if (traceFile !== undefined) {
+        try {
+          await configureTrace({ traceFile, traceFileMaxSize })
+        } catch (error) {
+          workletLogger.warn('trace file could not be opened', {
+            error: error?.code ?? error?.name
+          })
+        }
+      }
       if (sentryDsn) {
         try {
           const { initBareSentry } = await import('./utils/initBareSentry.js')
