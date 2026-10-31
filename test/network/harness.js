@@ -23,7 +23,8 @@ export const loadIsolatedModules = () => {
       network: require('../../src/worklet/utils/swarm'),
       personalSwarm: require('../../src/worklet/personalSwarm'),
       dht: require('../../src/worklet/utils/dht'),
-      logger: require('../../src/worklet/utils/workletLogger')
+      logger: require('../../src/worklet/utils/workletLogger'),
+      trace: require('../../src/worklet/trace')
     }
   })
   return modules

@@ -3,6 +3,7 @@ import os from 'os'
 import path from 'path'
 
 import { converge, createNetwork, shareVault, waitFor } from './harness.js'
+import { writeTimeline } from './timeline.js'
 import { Tracer, short } from './tracer.js'
 
 const HEX_32 = /[0-9a-f]{64}/i
@@ -100,19 +101,38 @@ describe('per-peer tracer', () => {
     expect(lines).toHaveLength(a.length)
   })
 
-  test('never writes key material', async () => {
-    net = await createNetwork({ peers: ['A', 'B'] })
-    const { A, B } = net.peers
-    const code = await (async () => {
-      await A.createVault({ id: 'shared' })
-      return A.invite()
-    })()
-    await B.pair(code)
+  test('never writes key material, names or record contents, nor does its report', async () => {
+    net = await createNetwork({ peers: ['A', 'B', 'C'] })
+    const { A, B, C } = net.peers
+    const vaultName = 'Kitchen Drawer Vault'
+    const item = {
+      title: 'Bank of Narnia login',
+      username: 'aslan@wardrobe.example',
+      password: 'correct-horse-battery-staple-42',
+      note: 'the lamppost code is 7741'
+    }
+    await A.createVault({ id: 'shared', name: vaultName })
+    const codes = []
+    for (const peer of [B, C]) {
+      const code = await A.invite()
+      codes.push(code)
+      await peer.pair(code)
+    }
     await A.ensureEpoch({ start: true })
+    await A.add('record/r1', item)
     await A.add('note/1', { text: 'sealed' })
-    await converge(net.list, 'note/1')
+    await converge(net.list, 'record/r1')
+    // B fails to reach A for a while, then A is back.
+    await A.goOffline()
+    await waitFor(
+      () => net.tracers.B.events.some((e) => e.event === 'conn.fail'),
+      { label: 'B traced a failed attempt', timeout: 20000 }
+    )
+    await A.goOnline()
+    await A.kick('device-C')
+    await converge([A, B], 'note/1')
 
-    const secrets = []
+    const secrets = [vaultName, ...Object.values(item)]
     for (const peer of net.list) {
       secrets.push(
         peer.encryptionKey,
@@ -125,21 +145,54 @@ describe('per-peer tracer', () => {
         peer.instance.encryptionKey.toString('hex')
       )
     }
-    secrets.push(code.split('/')[1])
-    expect(secrets.every((s) => typeof s === 'string' && s.length >= 32)).toBe(
+    for (const code of codes) secrets.push(code.split('/')[1])
+    expect(secrets.every((s) => typeof s === 'string' && s.length >= 15)).toBe(
       true
     )
 
-    const lines = net.list.flatMap((peer) =>
-      net.tracers[peer.id].events.map((e) => JSON.stringify(e))
-    )
-    expect(lines.length).toBeGreaterThan(20)
-    for (const line of lines) {
-      for (const secret of secrets) expect(line).not.toContain(secret)
-      expect(line).not.toMatch(HEX_32)
-      expect(line).not.toMatch(B64_32)
-      expect(line).not.toMatch(Z32_LONG)
+    const events = net.list.flatMap((peer) => net.tracers[peer.id].events)
+    const names = new Set(events.map((e) => e.event))
+    for (const name of [
+      'conn.attempt',
+      'conn.fail',
+      'swarm.stats',
+      'swarm.peers',
+      'dht.stats',
+      'migration.start',
+      'migration.finish',
+      'pairing.invite',
+      'pairing.pair',
+      'pairing.paired',
+      'epoch.ensure',
+      'writer.remove',
+      'device.remove'
+    ]) {
+      expect(names).toContain(name)
     }
+    const sweep = (text) => {
+      for (const secret of secrets) expect(text).not.toContain(secret)
+      expect(text).not.toMatch(HEX_32)
+      expect(text).not.toMatch(B64_32)
+      expect(text).not.toMatch(Z32_LONG)
+    }
+    const lines = events.map((e) => JSON.stringify(e))
+    expect(lines.length).toBeGreaterThan(50)
+    for (const line of lines) sweep(line)
+    for (const peer of net.list) {
+      sweep(fs.readFileSync(net.tracers[peer.id].file, 'utf8'))
+    }
+
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'report-sweep-'))
+    const { html } = writeTimeline({
+      name: 'sweep',
+      files: net.traceFiles(),
+      failure: { messages: ['a failure message'] },
+      root
+    })
+    const report = fs.readFileSync(html, 'utf8')
+    expect(report).toContain('conn.fail')
+    sweep(report)
+    fs.rmSync(root, { recursive: true, force: true })
   })
 
   test('redacts sensitive field names the way the worklet logger does', () => {

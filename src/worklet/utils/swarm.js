@@ -1,3 +1,5 @@
+import { traceCreated } from '../trace/index.js'
+
 export async function getConfig(store) {
   try {
     const Swarmconf = require('@tetherto/swarmconf')
@@ -23,7 +25,9 @@ export async function getConfig(store) {
 // `options` itself and `networkCreated` only hands the instance back, so each
 // builder gets exactly the options it always got. Tests point every builder
 // at a local testnet bootstrap, replace the relays with local ones or none,
-// and see each instance as it is built.
+// and see each instance as it is built. A host that opted into a trace file
+// (SET_LOG_OPTIONS traceFile) also gets each instance traced; the options
+// stay the same.
 let networkOverrides = null
 
 /**
@@ -58,9 +62,11 @@ export const networkOptions = (options) => {
  * @template T
  * @param {string} label
  * @param {T} instance
+ * @param {string} [role] what the tracer calls it, when `label` is shared
  * @returns {T}
  */
-export const networkCreated = (label, instance) => {
+export const networkCreated = (label, instance, role = label) => {
   networkOverrides?.onCreate?.(label, instance)
+  traceCreated(role, instance)
   return instance
 }

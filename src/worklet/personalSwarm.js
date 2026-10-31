@@ -2,6 +2,8 @@ import b4a from 'b4a'
 import Hyperswarm from 'hyperswarm'
 
 import { getPersonalKeyPair, getVaultsInstance } from './appDeps'
+import { trace } from './trace/index.js'
+import { short } from './trace/tracer.js'
 import { getConfig, networkCreated, networkOptions } from './utils/swarm'
 import { workletLogger } from './utils/workletLogger'
 
@@ -141,6 +143,11 @@ export const personalSwarmSend = async (targetTopicHex, envelopeHex) => {
       if (resolved) return
       resolved = true
       clearTimeout(timeout)
+      trace('personal.send', {
+        topic: short(targetTopicHex),
+        ok: next.ok,
+        reason: next.reason?.split(':')[0] ?? null
+      })
       sendSwarm.destroy().catch(() => {})
       resolve(next)
     }
@@ -174,6 +181,7 @@ export const personalSwarmSend = async (targetTopicHex, envelopeHex) => {
 async function handleIncomingConnection(connection) {
   try {
     const envelopeBytes = await readFramed(connection)
+    trace('personal.envelope', { bytes: envelopeBytes.length })
     if (envelopeListeners.size === 0) return
 
     // Don't pass peer info: connection.remotePublicKey is an ephemeral

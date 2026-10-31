@@ -206,6 +206,9 @@ export class PearpassVaultClient extends EventEmitter {
    * @param {'debug'|'info'|'warn'|'error'} [opts.logLevel]
    * @param {boolean} [opts.dev] - enables console mirror when logLevel is 'debug'
    * @param {string|null} [opts.sentryDsn] - mobile/nightly only; omit on desktop
+   * @param {string|null} [opts.traceFile] - absolute path of an opt-in sync
+   *   trace (JSONL, see docs/tracing.md); null stops it, omit to leave it
+   * @param {number} [opts.traceFileMaxSize] - bytes before the trace rotates
    * @returns {Promise<void>}
    */
   async setLogOptions(opts) {
