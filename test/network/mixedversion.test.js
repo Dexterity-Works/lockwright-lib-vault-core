@@ -555,8 +555,11 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
   })
 
   test('upgrade: switching vaults right after the upgraded vault opens throws an uncaught TypeError (bug)', async () => {
-    // The bug, pinned. Once src is fixed this test fails: then expect
-    // `caught.errors` to be empty instead. The errors are collected off the
+    // The bug, pinned. Once it is fixed this test fails: then expect
+    // `caught.errors` to be empty instead. A separate diagnosis traced the
+    // race to Autobase 7.28.1 _close and found it fixed in hypercore
+    // 11.39.6, so bumping hypercore makes this fail too: the error stops,
+    // and the stack match below names 11.35.1. The errors are collected off the
     // real process (jest.environment.cjs) and the network is torn down
     // inside the capture, so none lands in a later test.
     // Cause (reproduced): the open-time re-sign's instance.add on the first
@@ -571,8 +574,9 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
     // 031d532 writes nothing on open; the upgrade creates the window.
     // The test holds w's re-sign add until the switch starts, so the add is
     // in flight when w closes. Whether the close lands inside the apply's
-    // flush still depends on timing: alone this test hit it 8 of 8 times,
-    // inside the full file it missed about 1 run in 3. So it tries up to
+    // flush still depends on timing. Without the hold the error was missed
+    // in 1 of 3 runs of this file; with the hold it came 8 of 8 times alone
+    // but was missed in 2 of 4 runs inside the full file. So it tries up to
     // five times and expects the error at least once.
     const attempt = async (round) => {
       let resign = null
@@ -626,8 +630,10 @@ suite(`mixed versions: ${RELEASED} beside the epoch re-key build`, () => {
       }
       return caught
     }
+    // A round left running after a timeout must not start another one.
+    const test = globalThis.__lockwrightNetworkTest
     let caught
-    for (let round = 1; round <= 5; round++) {
+    for (let round = 1; round <= 5 && !test.done; round++) {
       caught = await attempt(round)
       if (caught.errors.length) break
     }
