@@ -367,3 +367,55 @@ export class Peer {
     if (!keep) fs.rmSync(this.dir, { recursive: true, force: true })
   }
 }
+
+/**
+ * A device on the released build (test/network/release.cjs), driven the
+ * same way. The released build has no epoch store, so `ensureEpoch` and
+ * `epochStatus` throw. Its update listener runs only the dual-store
+ * reconcile, which this driver counts so a test can wait for one
+ * (harness.js reconciled()), and it records every row the released code
+ * writes.
+ */
+export class ReleasePeer extends Peer {
+  ensureEpoch() {
+    throw new Error(`${this.id} runs the released build, which has no epochs`)
+  }
+
+  epochStatus() {
+    return this.ensureEpoch()
+  }
+
+  async listen() {
+    // The released runIncrementalReconcile starts by reading `vault-ext`
+    // and calls onUpdate once it is done. Nothing else here reads that key
+    // once the vault is open, except vaultRemove, which a test that waits
+    // on reconciled() must not call.
+    this.reconcile = { started: 0, done: 0 }
+    // Every row the released code adds or removes, its own or a test's:
+    // the released appDeps writes the vault through these two only.
+    this.writes = []
+    const instance = this.instance
+    const get = instance.get.bind(instance)
+    instance.get = (key, ...rest) => {
+      if (key === 'vault-ext') this.reconcile.started++
+      return get(key, ...rest)
+    }
+    for (const op of ['add', 'remove']) {
+      const write = instance[op].bind(instance)
+      instance[op] = (key, ...rest) => {
+        this.writes.push({ op, key })
+        this.trace(`release.${op}`, { key })
+        return write(key, ...rest)
+      }
+    }
+    await this.appDeps.initListener({
+      vaultId: this.vaultId,
+      onUpdate: () => {
+        this.updates++
+        this.reconcile.done++
+        this.trace('vault.update', { n: this.updates })
+        this.onUpdate?.(this)
+      }
+    })
+  }
+}

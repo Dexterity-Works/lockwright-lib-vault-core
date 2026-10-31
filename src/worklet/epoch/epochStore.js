@@ -406,9 +406,10 @@ export const createEpochStore = ({
     }
   }
 
-  // My writer signs a device row that names it; any other row is stored
-  // as given and stays unbound.
-  const signRow = (key, value) => {
+  // My writer signs a device row that names it and my device key; any other
+  // row is stored as given and stays unbound. Signing a row with another
+  // device key would seal every later epoch to that key under my writer.
+  const signRow = (key, value, keyPair) => {
     if (!key.startsWith('device/') || !instance.base.writable) return value
     let row
     try {
@@ -421,6 +422,7 @@ export const createEpochStore = ({
       !row ||
       typeof row !== 'object' ||
       row.writerKey !== instance.writerKey?.toString('hex') ||
+      !isMe(row.masterTopic, keyPair) ||
       !local?.keyPair
     ) {
       return value
@@ -463,7 +465,11 @@ export const createEpochStore = ({
       }
     }
     if (isPlaintextKey(key) || legacy) {
-      return instance.add(key, signRow(key, value), file)
+      return instance.add(
+        key,
+        signRow(key, value, await getPersonalKeyPair()),
+        file
+      )
     }
 
     if (isStale()) {
@@ -697,7 +703,7 @@ export const createEpochStore = ({
       if ((await instance.get(key))?.value !== row.raw) continue
       resigned.add(state)
       try {
-        await instance.add(key, signRow(key, row.raw))
+        await instance.add(key, signRow(key, row.raw, keyPair))
         wrote = true
       } catch (error) {
         // Not written: the next run tries again. The run goes on, so one row
