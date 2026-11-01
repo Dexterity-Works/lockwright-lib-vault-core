@@ -122,6 +122,8 @@ export const createNetwork = async ({
       })
       // eslint-disable-next-line no-console
       console.log(`timeline: ${timeline.txt}`)
+      // eslint-disable-next-line no-console
+      if (timeline.report) console.log(`report: ${timeline.report}`)
     }
     if (!keep) removeDir(dir)
     try {
@@ -147,6 +149,8 @@ export const createNetwork = async ({
         })
         // eslint-disable-next-line no-console
         console.log(`timeline: ${timeline.txt}`)
+        // eslint-disable-next-line no-console
+        if (timeline.report) console.log(`report: ${timeline.report}`)
       }
       throw error
     }

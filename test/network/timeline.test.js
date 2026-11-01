@@ -83,6 +83,10 @@ describe('timeline artifacts', () => {
       'forced-failure-fails-after-creating-a-vault'
     )
     expect(output).toContain(`timeline: ${path.join(dir, 'timeline.txt')}`)
+    expect(output).toContain(`report: ${path.join(dir, 'report.html')}`)
+    expect(fs.readFileSync(path.join(dir, 'report.html'), 'utf8')).toContain(
+      'nothing-like-it'
+    )
     const txt = fs.readFileSync(path.join(dir, 'timeline.txt'), 'utf8')
     expect(txt).toContain('# failed:')
     expect(txt).toMatch(/\bA\s+peer\.createVault\b/)

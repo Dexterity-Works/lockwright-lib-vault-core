@@ -3,6 +3,7 @@ import os from 'os'
 import path from 'path'
 
 import { converge, createNetwork, shareVault, waitFor } from './harness.js'
+import { buildModel, renderReport } from './report.js'
 import { Tracer, short } from './tracer.js'
 
 const HEX_32 = /[0-9a-f]{64}/i
@@ -140,6 +141,17 @@ describe('per-peer tracer', () => {
       expect(line).not.toMatch(B64_32)
       expect(line).not.toMatch(Z32_LONG)
     }
+    // The report holds the same events, so the same sweep must hold for it.
+    const html = renderReport(
+      buildModel({
+        name: 'sweep',
+        events: net.list.flatMap((peer) => net.tracers[peer.id].events)
+      })
+    )
+    for (const secret of secrets) expect(html).not.toContain(secret)
+    expect(html).not.toMatch(HEX_32)
+    expect(html).not.toMatch(B64_32)
+    expect(html).not.toMatch(Z32_LONG)
   })
 
   test('redacts sensitive field names the way the worklet logger does', () => {
