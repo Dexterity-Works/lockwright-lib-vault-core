@@ -514,7 +514,7 @@ export function reportPage() {
               m.t <= t &&
               m.t > killedAt.t
           )
-        const bad = exit !== undefined && exit !== 0
+        const bad = exit !== undefined && exit !== data.expectedExit
         const sub = killed
           ? 'killed'
           : band
@@ -947,7 +947,11 @@ export function reportPage() {
         if (r.type === 'head') {
           const exit = data.exits[r.peer]
           const exitText =
-            exit === undefined ? '' : exit === 0 ? '  exit 0' : `  exit ${exit}`
+            exit === undefined
+              ? ''
+              : exit === data.expectedExit
+                ? `  exit ${exit}`
+                : `  exit ${exit} (expected ${data.expectedExit})`
           svg(
             'line',
             {
@@ -1557,7 +1561,13 @@ export function reportPage() {
               {},
               `peer ${p}`,
               data.exits[p] !== undefined
-                ? h('span', { class: 'muted' }, `  exit ${data.exits[p]}`)
+                ? h(
+                    'span',
+                    { class: 'muted' },
+                    data.exits[p] === data.expectedExit
+                      ? `  exit ${data.exits[p]}`
+                      : `  exit ${data.exits[p]} (expected ${data.expectedExit})`
+                  )
                 : null
             ),
             h(

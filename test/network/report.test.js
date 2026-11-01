@@ -321,4 +321,58 @@ describe('network report', () => {
     expect(loadRun(run).outDir).toBe(out.dir)
     fs.rmSync(run, { recursive: true, force: true })
   })
+
+  test('a negative cell whose peers exit 1 by design renders as passed', () => {
+    const run = fs.mkdtempSync(path.join(os.tmpdir(), 'lab-neg-'))
+    for (const sub of ['traces', 'logs', 'mailbox']) {
+      fs.mkdirSync(path.join(run, sub))
+    }
+    const events = [
+      ev(0, 'A', 'peer.start'),
+      ev(1, 'A', 'peer.invite', { vaultId: 'vault-A' }),
+      ev(2, 'B', 'peer.start'),
+      ev(3, 'B', 'peer.pair', { vaultId: 'vault-A' }),
+      ev(40, 'B', 'script.fail', { message: 'pair not met within 30000 ms' }),
+      ev(41, 'A', 'script.fail', { message: 'giving up: done.B says fail' })
+    ]
+    for (const peer of ['A', 'B']) {
+      fs.writeFileSync(
+        path.join(run, 'traces', `${peer}.jsonl`),
+        events
+          .filter((e) => e.peer === peer)
+          .map((e) => JSON.stringify(e))
+          .join('\n')
+      )
+    }
+    fs.writeFileSync(path.join(run, 'logs', 'lab.log'), LAB_LOG)
+    fs.writeFileSync(
+      path.join(run, 'logs', 'assert.log'),
+      'assertions passed: negative cell\n'
+    )
+    fs.writeFileSync(
+      path.join(run, 'scenario.json'),
+      JSON.stringify({ name: 'pairing', peers: { A: [], B: [] } })
+    )
+    // run-lab.sh: in a negative cell every peer must exit 1, and it did.
+    fs.writeFileSync(path.join(run, 'expected-exit'), '1\n')
+    fs.writeFileSync(path.join(run, 'exit.A'), '1\n')
+    fs.writeFileSync(path.join(run, 'exit.B'), '1\n')
+
+    const out = writeTimeline({
+      name: 'pairing',
+      files: ['A', 'B'].map((p) => path.join(run, 'traces', `${p}.jsonl`)),
+      root: run
+    })
+    const html = fs.readFileSync(out.report, 'utf8')
+    const model = modelOf(html)
+    expect(model.expectedExit).toBe(1)
+    expect(model.exits).toEqual({ A: 1, B: 1 })
+    expect(model.failed).toBe(false)
+    expect(html).toContain('<title>ok · pairing</title>')
+
+    // The same peers exiting 1 where 0 was expected is still a failure.
+    fs.writeFileSync(path.join(run, 'expected-exit'), '0\n')
+    expect(loadRun(run).model.failed).toBe(true)
+    fs.rmSync(run, { recursive: true, force: true })
+  })
 })

@@ -102,6 +102,7 @@ export const buildModel = ({
   scenario = null,
   faults = [],
   exits = {},
+  expectedExit = 0,
   logs = {},
   source = null
 }) => {
@@ -313,7 +314,11 @@ export const buildModel = ({
     (a, b) => labelRank(a) - labelRank(b)
   )
 
-  const failed = !!failure || Object.values(exits).some((code) => code !== 0)
+  // A negative cell expects every peer to fail its script (exit 1); the run
+  // passes when the peers did what the cell declared, so the exit codes are
+  // judged against that, not against 0.
+  const failed =
+    !!failure || Object.values(exits).some((code) => code !== expectedExit)
   return {
     name,
     source,
@@ -325,6 +330,7 @@ export const buildModel = ({
     peers,
     labels,
     exits,
+    expectedExit,
     keys,
     topology: topology ?? {
       layer: 1,
@@ -446,6 +452,10 @@ export const loadRun = (input) => {
     options.topology = labLog ? parseLabLog(labLog) : null
     options.scenario = scenarioText ? JSON.parse(scenarioText) : null
     options.faults = readFaults(path.join(runDir, 'mailbox'))
+    // run-lab.sh writes the exit code the cell expects of every peer (1 in a
+    // negative cell); older run dirs have none, and 0 was the only expectation.
+    const expected = readText(path.join(runDir, 'expected-exit'))
+    options.expectedExit = expected === null ? 0 : Number(expected.trim())
     options.exits = Object.fromEntries(
       fs
         .readdirSync(runDir)
