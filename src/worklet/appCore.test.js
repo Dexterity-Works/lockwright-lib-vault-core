@@ -16,6 +16,9 @@ const mockGetVaultMigrationStatus = jest.fn()
 const mockCloseActiveVaultInstance = jest.fn()
 const mockVaultRemove = jest.fn()
 const mockVaultRemoveWriter = jest.fn()
+const mockActiveVaultEnsureEpoch = jest.fn()
+const mockActiveVaultGetEpochStatus = jest.fn()
+const mockSetEpochStatusListener = jest.fn()
 const mockActiveVaultList = jest.fn()
 const mockActiveVaultFind = jest.fn()
 const mockActiveVaultGetWriterKey = jest.fn()
@@ -64,6 +67,10 @@ jest.mock('./appDeps', () => ({
   closeActiveVaultInstance: (...args) => mockCloseActiveVaultInstance(...args),
   vaultRemove: (...args) => mockVaultRemove(...args),
   vaultRemoveWriter: (...args) => mockVaultRemoveWriter(...args),
+  activeVaultEnsureEpoch: (...args) => mockActiveVaultEnsureEpoch(...args),
+  activeVaultGetEpochStatus: (...args) =>
+    mockActiveVaultGetEpochStatus(...args),
+  setEpochStatusListener: (...args) => mockSetEpochStatusListener(...args),
   activeVaultList: (...args) => mockActiveVaultList(...args),
   activeVaultFind: (...args) => mockActiveVaultFind(...args),
   activeVaultGetWriterKey: (...args) => mockActiveVaultGetWriterKey(...args),
@@ -93,7 +100,9 @@ jest.mock('./appDeps', () => ({
 }))
 
 jest.mock('sodium-native', () => {
+  // The rest stays real: hypercore hashes its namespaces on import.
   const api = {
+    ...jest.requireActual('sodium-native'),
     crypto_secretbox_easy: jest.fn(),
     crypto_secretbox_open_easy: jest.fn(),
     randombytes_buf: jest.fn()
@@ -254,7 +263,10 @@ jest.mock('./api', () => {
     FETCH_FAVICON: 44,
     ACTIVE_VAULT_FIND: 61,
     ACTIVE_VAULT_GET_WRITER_KEY: 62,
-    ENCRYPTION_DECRYPT_BITWARDEN_EXPORT: 63
+    ENCRYPTION_DECRYPT_BITWARDEN_EXPORT: 63,
+    ACTIVE_VAULT_ENSURE_EPOCH: 83,
+    ACTIVE_VAULT_GET_EPOCH_STATUS: 84,
+    ON_EPOCH_STATUS: 85
   }
 
   const API_BY_VALUE = Object.entries(API).reduce((acc, [key, value]) => {
@@ -296,6 +308,11 @@ import FramedStream from 'framed-stream'
 
 import { API } from './api'
 import { handleRpcCommand, setupIPC, createRPC } from './appCore'
+import {
+  EpochKeyUnavailableError,
+  EpochRotationPendingError,
+  writeErrorMessage
+} from './epoch/keyring'
 import { isPearWorker } from './utils/isPearWorker'
 import { parseRequestData } from './utils/parseRequestData'
 import { receiveFileStream } from '../utils/recieveFileStream'
@@ -800,6 +817,94 @@ describe('handleRpcCommand', () => {
 
     const payload = JSON.parse(reply.mock.calls[0][0])
     expect(payload.error).toContain('Error removing writer from active vault')
+  })
+
+  test('ACTIVE_VAULT_ENSURE_EPOCH: forwards start and replies with the result', async () => {
+    parseRequestData.mockReturnValue({ start: true })
+    mockActiveVaultEnsureEpoch.mockResolvedValue({ rotated: true, id: 'e1' })
+
+    const reply = jest.fn()
+    await handleRpcCommand({
+      command: API.ACTIVE_VAULT_ENSURE_EPOCH,
+      data: { start: true },
+      reply
+    })
+
+    expect(mockActiveVaultEnsureEpoch).toHaveBeenCalledWith({ start: true })
+    expect(JSON.parse(reply.mock.calls[0][0])).toEqual({
+      data: { rotated: true, id: 'e1' }
+    })
+  })
+
+  test('ACTIVE_VAULT_ENSURE_EPOCH: surfaces errors', async () => {
+    parseRequestData.mockReturnValue({})
+    mockActiveVaultEnsureEpoch.mockRejectedValue(new Error('boom'))
+
+    const reply = jest.fn()
+    await handleRpcCommand({
+      command: API.ACTIVE_VAULT_ENSURE_EPOCH,
+      data: {},
+      reply
+    })
+
+    expect(JSON.parse(reply.mock.calls[0][0]).error).toContain(
+      'Error rotating the vault epoch'
+    )
+  })
+
+  test('ACTIVE_VAULT_ENSURE_EPOCH: names a typed epoch error to the client', async () => {
+    for (const error of [
+      new EpochRotationPendingError(),
+      new EpochKeyUnavailableError('e1')
+    ]) {
+      parseRequestData.mockReturnValue({ start: true })
+      mockActiveVaultEnsureEpoch.mockRejectedValue(error)
+
+      const reply = jest.fn()
+      await handleRpcCommand({
+        command: API.ACTIVE_VAULT_ENSURE_EPOCH,
+        data: { start: true },
+        reply
+      })
+
+      const message = JSON.parse(reply.mock.calls[0][0]).error
+      expect(message).toContain(error.name)
+      expect(message).toContain(error.message)
+    }
+  })
+
+  test('ACTIVE_VAULT_ADD: passes the epoch wording through to the client', async () => {
+    parseRequestData.mockReturnValue({ key: 'record/r1', data: {} })
+    // activeVaultAdd words a typed epoch error with writeErrorMessage.
+    mockActiveVaultAdd.mockRejectedValue(
+      new Error(writeErrorMessage(new EpochRotationPendingError()))
+    )
+
+    const reply = jest.fn()
+    await handleRpcCommand({
+      command: API.ACTIVE_VAULT_ADD,
+      data: { key: 'record/r1', data: {} },
+      reply
+    })
+
+    expect(JSON.parse(reply.mock.calls[0][0]).error).toBe(
+      'Error adding record to active vault: Error: Vault key must rotate first: wait for a device that can rotate it'
+    )
+  })
+
+  test('ACTIVE_VAULT_GET_EPOCH_STATUS: replies with the status', async () => {
+    parseRequestData.mockReturnValue(undefined)
+    mockActiveVaultGetEpochStatus.mockResolvedValue({ legacy: true })
+
+    const reply = jest.fn()
+    await handleRpcCommand({
+      command: API.ACTIVE_VAULT_GET_EPOCH_STATUS,
+      reply
+    })
+
+    expect(JSON.parse(reply.mock.calls[0][0])).toEqual({
+      data: { legacy: true }
+    })
   })
 
   test('ACTIVE_VAULT_LIST: success path', async () => {
@@ -1558,5 +1663,20 @@ describe('createRPC', () => {
     expect(reply).toHaveBeenCalledTimes(1)
     const payload = JSON.parse(reply.mock.calls[0][0])
     expect(payload.error).toContain('Unknown command')
+  })
+
+  test('pushes ON_EPOCH_STATUS with the status from appDeps', () => {
+    createRPC({ some: 'ipc' })
+    const listener = mockSetEpochStatusListener.mock.calls.at(-1)[0]
+    const send = jest.fn()
+    mockRPCInstance.request = jest.fn(() => ({ send }))
+
+    listener({ epoch: 'e1', legacy: false })
+
+    expect(mockRPCInstance.request).toHaveBeenCalledWith(API.ON_EPOCH_STATUS)
+    expect(JSON.parse(send.mock.calls[0][0])).toEqual({
+      epoch: 'e1',
+      legacy: false
+    })
   })
 })

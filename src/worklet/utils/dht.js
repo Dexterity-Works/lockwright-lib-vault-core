@@ -1,10 +1,12 @@
 import DHT from 'hyperdht'
 
+import { networkCreated, networkOptions } from './swarm'
+
 let sharedDHT = null
 
 export const getSharedDHT = () => {
   if (!sharedDHT) {
-    sharedDHT = new DHT()
+    sharedDHT = networkCreated('sharedDHT', new DHT(networkOptions()))
   }
   return sharedDHT
 }

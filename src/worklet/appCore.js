@@ -6,8 +6,10 @@ import Suspendify from 'suspendify'
 import { API, API_BY_VALUE } from './api'
 import {
   activeVaultAdd,
+  activeVaultEnsureEpoch,
   activeVaultFind,
   activeVaultGet,
+  activeVaultGetEpochStatus,
   activeVaultGetFile,
   activeVaultGetWriterKey,
   activeVaultList,
@@ -62,7 +64,8 @@ import {
   removeOtpFromRecord,
   findOtpDuplicates,
   exportOtpRecords,
-  getVaultMigrationStatus
+  getVaultMigrationStatus,
+  setEpochStatusListener
 } from './appDeps'
 import { decryptAegisExport } from './decryptAegisExport'
 import { decryptBitwardenExport } from './decryptBitwardenExport'
@@ -118,6 +121,13 @@ const wirePersonalSwarmEnvelopeListener = () => {
     if (!rpc) return
     const req = rpc.request(API.ON_PERSONAL_SWARM_ENVELOPE)
     req.send(JSON.stringify({ envelope }))
+  })
+}
+
+const wireEpochStatusListener = () => {
+  setEpochStatusListener((status) => {
+    if (!rpc) return
+    rpc.request(API.ON_EPOCH_STATUS).send(JSON.stringify(status))
   })
 }
 
@@ -555,6 +565,38 @@ export const handleRpcCommand = async (req) => {
         req.reply(
           JSON.stringify({
             error: `Error removing writer from active vault: ${error}`
+          })
+        )
+      }
+
+      break
+
+    case API.ACTIVE_VAULT_ENSURE_EPOCH:
+      try {
+        const result = await activeVaultEnsureEpoch({
+          start: requestData?.start === true
+        })
+
+        req.reply(JSON.stringify({ data: result }))
+      } catch (error) {
+        req.reply(
+          JSON.stringify({
+            error: `Error rotating the vault epoch: ${error}`
+          })
+        )
+      }
+
+      break
+
+    case API.ACTIVE_VAULT_GET_EPOCH_STATUS:
+      try {
+        const status = await activeVaultGetEpochStatus()
+
+        req.reply(JSON.stringify({ data: status }))
+      } catch (error) {
+        req.reply(
+          JSON.stringify({
+            error: `Error getting the vault epoch status: ${error}`
           })
         )
       }
@@ -1498,5 +1540,6 @@ export const createRPC = (ipc) => {
     }
   })
   wirePersonalSwarmEnvelopeListener()
+  wireEpochStatusListener()
   return rpc
 }

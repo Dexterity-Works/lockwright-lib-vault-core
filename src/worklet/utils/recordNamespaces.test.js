@@ -14,6 +14,8 @@ import {
   parseRecordIdFromKey,
   parseFileKey,
   v1FileKeyToV2,
+  deriveUrisFromWebsites,
+  deriveWebsitesFromUris,
   convertV1RecordToV2,
   projectV2ToV1,
   mergeV1IntoV2,
@@ -22,7 +24,8 @@ import {
   reconcileDualStore,
   writeRecordV2AndProjectV1,
   getRawRecordPreferV2,
-  deepEqualJson
+  deepEqualJson,
+  buildRecordUpdatedAtIndex
 } from './recordNamespaces.js'
 
 const makeLoginV1 = (overrides = {}) => {
@@ -124,6 +127,54 @@ describe('recordNamespaces key helpers', () => {
     })
     expect(v1FileKeyToV2('record/abc/file/f1')).toBe('record-v2/abc/file/f1')
   })
+
+  test('rejects non-string and v2 keys when converting a v1 file key', () => {
+    expect(parseRecordIdFromKey(null)).toBeNull()
+    expect(parseFileKey(null)).toBeNull()
+    expect(v1FileKeyToV2('record-v2/abc/file/f1')).toBeNull()
+    expect(v1FileKeyToV2('record/abc')).toBeNull()
+  })
+})
+
+describe('website and URI fallbacks', () => {
+  test('uses defaults for missing websites and invalid prior URI entries', () => {
+    expect(deriveUrisFromWebsites(undefined, undefined)).toEqual([])
+    expect(
+      deriveUrisFromWebsites(
+        ['https://example.com', 'https://other.com'],
+        [null, { uri: 3 }, { uri: 'https://example.com', match: '' }]
+      )
+    ).toEqual([
+      { uri: 'https://example.com', match: 'baseDomain' },
+      { uri: 'https://other.com', match: 'baseDomain' }
+    ])
+  })
+
+  test('drops invalid URI entries and uses only array website fallbacks', () => {
+    expect(deriveWebsitesFromUris([null, {}, { uri: 3 }], undefined)).toEqual(
+      []
+    )
+    expect(deriveWebsitesFromUris(undefined, undefined)).toEqual([])
+    expect(deriveWebsitesFromUris(undefined, ['https://example.com'])).toEqual([
+      'https://example.com'
+    ])
+  })
+})
+
+test('buildRecordUpdatedAtIndex skips missing ids and defaults invalid times', () => {
+  expect(
+    buildRecordUpdatedAtIndex([
+      null,
+      {},
+      { id: 'missing-time' },
+      { id: 'invalid-time', updatedAt: 'not a time' }
+    ])
+  ).toEqual(
+    new Map([
+      ['missing-time', 0],
+      ['invalid-time', 0]
+    ])
+  )
 })
 
 describe('convert / project / merge', () => {
@@ -188,6 +239,30 @@ describe('convert / project / merge', () => {
     expect(mergeV1IntoV2(v1, v2)).toBeNull()
   })
 
+  test('handles missing records and records without website fields', () => {
+    expect(() => convertV1RecordToV2(null)).toThrow('record required')
+    expect(convertV1RecordToV2({ id: 'note', type: 'note', data: {} })).toEqual(
+      {
+        id: 'note',
+        type: 'note',
+        schema: 2,
+        data: {}
+      }
+    )
+    expect(() => projectV2ToV1(null)).toThrow('record required')
+    expect(projectV2ToV1({ id: 'empty', data: null })).toEqual({
+      id: 'empty',
+      data: { websites: [] }
+    })
+  })
+
+  test('mergeV1IntoV2 converts without a v2 row and ignores missing v1', () => {
+    const v1 = makeLoginV1()
+
+    expect(mergeV1IntoV2(null, {})).toBeNull()
+    expect(mergeV1IntoV2(v1, null)).toEqual(convertV1RecordToV2(v1))
+  })
+
   test('checkMigrationCompleteness allows v2-only extras', () => {
     const result = checkMigrationCompleteness(
       ['a'],
@@ -198,6 +273,16 @@ describe('convert / project / merge', () => {
     expect(result.complete).toBe(true)
     expect(result.missingRecordIds).toEqual([])
     expect(result.missingFileKeys).toEqual([])
+  })
+
+  test('checkMigrationCompleteness names missing records and invalid file keys', () => {
+    expect(
+      checkMigrationCompleteness(['missing'], [], ['record/bad'], [])
+    ).toEqual({
+      complete: false,
+      missingRecordIds: ['missing'],
+      missingFileKeys: ['record/bad']
+    })
   })
 
   test('deepEqualJson', () => {
@@ -399,6 +484,19 @@ describe('writeRecordV2AndProjectV1', () => {
     expect(v1.data.otp.secret).toBe('NEWSECRETBASE32XX')
     expect(v1.data.uris).toBeUndefined()
     expect(v1.schema).toBeUndefined()
+  })
+
+  test('does not rewrite an already projected v2 and v1 pair', async () => {
+    const v2 = convertV1RecordToV2(makeLoginV1())
+    const { adapter } = createMemoryVault({
+      [recordKeyV1('rec1')]: projectV2ToV1(v2),
+      [recordKeyV2('rec1')]: v2
+    })
+    const addJson = jest.spyOn(adapter, 'addJson')
+
+    await writeRecordV2AndProjectV1(adapter, 'rec1', v2)
+
+    expect(addJson).not.toHaveBeenCalled()
   })
 })
 
