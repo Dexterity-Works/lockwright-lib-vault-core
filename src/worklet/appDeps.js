@@ -25,7 +25,7 @@ import { PearPassPairer } from './pearpassPairer'
 import { RateLimiter } from './rateLimiter'
 import { workletLogger } from './utils/workletLogger'
 import { OTP_TYPE } from '../constants/otpType'
-import { getConfig } from './utils/swarm'
+import { getConfig, networkCreated, networkOptions } from './utils/swarm'
 import { validateAndSanitizePath } from './validateAndSanitizePath'
 import { defaultMirrorKeys } from '../constants/defaultBlindMirrors'
 import {
@@ -796,15 +796,21 @@ export const initInstance = async ({ path, hashedPassword, encryptionKey }) => {
 
     const conf = await getConfig(store)
 
-    const instance = new Autopass(store, {
-      encryptionKey: encryptionKey
-        ? Buffer.from(encryptionKey, 'base64')
-        : undefined,
-      blindEncryption: hashedPassword
-        ? new BlindEncryptionSodium(b4a.alloc(32, hashedPassword, 'utf-8'))
-        : undefined,
-      relayThrough: conf.current.blindRelays
-    })
+    const instance = networkCreated(
+      'autopass',
+      new Autopass(
+        store,
+        networkOptions({
+          encryptionKey: encryptionKey
+            ? Buffer.from(encryptionKey, 'base64')
+            : undefined,
+          blindEncryption: hashedPassword
+            ? new BlindEncryptionSodium(b4a.alloc(32, hashedPassword, 'utf-8'))
+            : undefined,
+          relayThrough: conf.current.blindRelays
+        })
+      )
+    )
 
     await instance.ready()
 
@@ -847,16 +853,22 @@ export const initInstanceWithNewBlindEncryption = async ({
 
     const conf = await getConfig(store)
 
-    const instance = new Autopass(store, {
-      encryptionKey: encryptionKey
-        ? Buffer.from(encryptionKey, 'base64')
-        : undefined,
-      blindEncryption: new BlindEncryptionSodium(
-        b4a.alloc(32, newHashedPassword, 'utf-8'),
-        b4a.alloc(32, currentHashedPassword, 'utf-8')
-      ),
-      relayThrough: conf.current.blindRelays
-    })
+    const instance = networkCreated(
+      'autopass',
+      new Autopass(
+        store,
+        networkOptions({
+          encryptionKey: encryptionKey
+            ? Buffer.from(encryptionKey, 'base64')
+            : undefined,
+          blindEncryption: new BlindEncryptionSodium(
+            b4a.alloc(32, newHashedPassword, 'utf-8'),
+            b4a.alloc(32, currentHashedPassword, 'utf-8')
+          ),
+          relayThrough: conf.current.blindRelays
+        })
+      )
+    )
 
     await instance.ready()
 

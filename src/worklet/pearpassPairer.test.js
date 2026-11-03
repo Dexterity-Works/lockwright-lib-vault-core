@@ -6,6 +6,8 @@ import Autopass from 'autopass'
 import Corestore from 'corestore'
 
 import { PearPassPairer } from './pearpassPairer'
+import * as swarmModule from './utils/swarm'
+import { setNetworkOverrides } from './utils/swarm'
 
 // Mock the native modules before importing anything that depends on them
 jest.mock('autopass', () => ({
@@ -103,6 +105,41 @@ describe('PearPassPairer', () => {
       expect(pairer.store).toBeNull()
       expect(pairer.pair).toBeNull()
       expect(result).toBe(expectedKey)
+    })
+
+    it('passes exactly relayThrough and blindEncryption to Autopass.pair by default', async () => {
+      // A relay list only production's config holds, so dropping it fails.
+      const relays = [Buffer.alloc(32, 7)]
+      const spy = jest
+        .spyOn(swarmModule, 'getConfig')
+        .mockResolvedValue({ current: { blindRelays: relays } })
+      try {
+        await pairer.pairInstance(path, invite)
+      } finally {
+        spy.mockRestore()
+      }
+
+      const options = Autopass.pair.mock.calls[0][2]
+      expect(Object.keys(options)).toEqual(['relayThrough', 'blindEncryption'])
+      expect(options.relayThrough).toBe(relays)
+    })
+
+    it('adds the overridden bootstrap and relays and reports the pairer', async () => {
+      const onCreate = jest.fn()
+      const bootstrap = [{ host: '127.0.0.1', port: 49737 }]
+      setNetworkOverrides({ bootstrap, relayThrough: null, onCreate })
+      try {
+        await pairer.pairInstance(path, invite)
+      } finally {
+        setNetworkOverrides(null)
+      }
+
+      expect(Autopass.pair.mock.calls[0][2]).toEqual({
+        relayThrough: null,
+        blindEncryption: expect.anything(),
+        bootstrap
+      })
+      expect(onCreate).toHaveBeenCalledWith('pairer', mockPair)
     })
 
     it('should throw an error if the store fails to create', async () => {

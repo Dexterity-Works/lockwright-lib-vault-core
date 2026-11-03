@@ -284,6 +284,8 @@ import {
   writeErrorMessage
 } from './epoch/keyring'
 import { convertV1RecordToV2 } from './utils/recordNamespaces'
+import * as swarmModule from './utils/swarm'
+import { setNetworkOverrides } from './utils/swarm'
 
 const mockSodium = require('sodium-native')
 
@@ -442,6 +444,118 @@ describe('appDeps module functions (excluding encryption)', () => {
         hashedPassword: 'pw'
       })
       expect(appDeps.getIsVaultsInitialized()).toBe(true)
+    })
+
+    // A relay list only production's config holds, so a builder that drops
+    // or replaces it fails (the mocked swarmconf's [] could not tell).
+    const withRelays = async (fn) => {
+      const relays = [Buffer.alloc(32, 7)]
+      const spy = jest
+        .spyOn(swarmModule, 'getConfig')
+        .mockResolvedValue({ current: { blindRelays: relays } })
+      try {
+        await fn()
+      } finally {
+        spy.mockRestore()
+      }
+      return relays
+    }
+
+    test('masterVaultInit builds Autopass with exactly encryptionKey, blindEncryption and relayThrough', async () => {
+      await appDeps.setStoragePath('/home/testuser/vaultdata')
+      Autopass.mockClear()
+      const relays = await withRelays(() =>
+        appDeps.masterVaultInit({
+          encryptionKey: 'key',
+          hashedPassword: 'pw'
+        })
+      )
+
+      expect(Autopass).toHaveBeenCalledTimes(1)
+      const [, options] = Autopass.mock.calls[0]
+      expect(Object.keys(options)).toEqual([
+        'encryptionKey',
+        'blindEncryption',
+        'relayThrough'
+      ])
+      expect(options.relayThrough).toBe(relays)
+    })
+
+    test('masterVaultInitWithNewBlindEncryption builds Autopass with the same three options', async () => {
+      await appDeps.setStoragePath('/home/testuser/vaultdata')
+      Autopass.mockClear()
+      const relays = await withRelays(() =>
+        appDeps.masterVaultInitWithNewBlindEncryption({
+          encryptionKey: 'key',
+          newHashedPassword: 'new',
+          currentHashedPassword: 'old'
+        })
+      )
+
+      const [, options] = Autopass.mock.calls[0]
+      expect(Object.keys(options)).toEqual([
+        'encryptionKey',
+        'blindEncryption',
+        'relayThrough'
+      ])
+      expect(options.relayThrough).toBe(relays)
+    })
+
+    test('masterVaultInit passes the overridden bootstrap and reports the instance', async () => {
+      const onCreate = jest.fn()
+      const bootstrap = [{ host: '127.0.0.1', port: 49737 }]
+      setNetworkOverrides({ bootstrap, relayThrough: null, onCreate })
+      try {
+        await appDeps.setStoragePath('/home/testuser/vaultdata')
+        Autopass.mockClear()
+        await appDeps.masterVaultInit({
+          encryptionKey: 'key',
+          hashedPassword: 'pw'
+        })
+      } finally {
+        setNetworkOverrides(null)
+      }
+
+      const [, options] = Autopass.mock.calls[0]
+      expect(options).toEqual({
+        encryptionKey: expect.anything(),
+        blindEncryption: expect.anything(),
+        relayThrough: null,
+        bootstrap
+      })
+      expect(onCreate).toHaveBeenCalledWith(
+        'autopass',
+        appDeps.getVaultsInstance()
+      )
+    })
+
+    test('masterVaultInitWithNewBlindEncryption passes the overridden bootstrap and reports the instance', async () => {
+      const onCreate = jest.fn()
+      const bootstrap = [{ host: '127.0.0.1', port: 49737 }]
+      setNetworkOverrides({ bootstrap, relayThrough: null, onCreate })
+      try {
+        await appDeps.setStoragePath('/home/testuser/vaultdata')
+        Autopass.mockClear()
+        await appDeps.masterVaultInitWithNewBlindEncryption({
+          encryptionKey: 'key',
+          newHashedPassword: 'new',
+          currentHashedPassword: 'old'
+        })
+      } finally {
+        setNetworkOverrides(null)
+      }
+
+      const [, options] = Autopass.mock.calls[0]
+      expect(options).toEqual({
+        encryptionKey: expect.anything(),
+        blindEncryption: expect.anything(),
+        relayThrough: null,
+        bootstrap
+      })
+      expect(onCreate).toHaveBeenCalledWith(
+        'autopass',
+        appDeps.getVaultsInstance()
+      )
     })
 
     test('closeVaultsInstance resets vaultsInitialized to false', async () => {

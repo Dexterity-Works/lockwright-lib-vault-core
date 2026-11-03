@@ -1,0 +1,84 @@
+name: Network harness (Layer 1)
+
+# The in-process network scenarios: real Hyperswarm peers on a local
+# hyperdht testnet on the loopback, never the public DHT (test/network/guard.cjs).
+# PR-triggered only, read-only token, no secrets, no deploy. Layers 2 and 3
+# (the namespace lab) are not run here; see docs/testing/network.md in the
+# superproject for what that would take.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, labeled]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: network-layer1-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  authorize:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    outputs:
+      allowed: ${{ steps.auth.outputs.allowed }}
+    steps:
+      - name: Checkout workflow code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Authorize PR execution
+        id: auth
+        uses: ./.github/actions/authorize-pr
+        with:
+          github-token: ${{ github.token }}
+
+  layer1:
+    needs: authorize
+    if: needs.authorize.outputs.allowed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.10.0 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          NPM_CONFIG_LEGACY_PEER_DEPS: true
+
+      - name: Run the Layer 1 network scenarios
+        # Peer storage needs a directory appDeps accepts (not /tmp, /var or a
+        # dot-directory); failed tests leave timelines under test-artifacts/.
+        run: |
+          mkdir -p "$RUNNER_TEMP/lockwright-net"
+          pnpm test:network --ci --json --outputFile=test-artifacts/jest-network.json
+        env:
+          LOCKWRIGHT_NET_TMP: ${{ runner.temp }}/lockwright-net
+          CI: "1"
+
+      - name: Upload timelines and results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: network-layer1-artifacts
+          path: test-artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
